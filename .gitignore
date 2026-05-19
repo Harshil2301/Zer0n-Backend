@@ -1,0 +1,89 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Node modules
+node_modules/
+npm-debug.log
+npm-debug.log.*
+yarn-debug.log
+yarn-error.log
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Firebase
+.firebase/
+.firebaserc
+config/firebase-credentials.json
+firebase-credentials.json
+*firebase-credentials*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# API keys and secrets (be careful!)
+**/credentials.json
+**/serviceAccountKey.json
+
+# Cache
+.cache/
+.eslintcache
+
+# Package manager files
+package-lock.json
+yarn.lock
+
+# Uploads
+uploads/
+
+# SSL certificates
+*.pem
+*.key
+*.crt
+
+# Media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wav
+*.mp3
+
+# Backups
+*.bak
+*.backup
+*~

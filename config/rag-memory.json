@@ -1,0 +1,15 @@
+{
+  "learnedLessons": [
+    {
+      "payloadPattern": "<script>alert('XSS')</script>",
+      "reason": "The provided payload '<script>alert('XSS')</script>' is a basic and well-known XSS payload that is easily detectable by most modern web applications. The description also mentions bypassing 'basic filters' with payloads like '<svg/onload=alert(\"XSS\")>' or '<img/src/onerror=alert(\"XSS\")>', but it does not provide any evidence that these payloads actually bypassed any filters or were executed successfully. A genuine vulnerability assessment should include proof of concept (PoC) code or a detailed explanation of how the payload was successfully executed.",
+      "timestamp": "2026-05-15T12:04:43.790Z"
+    },
+    {
+      "type": "Cross-Site Scripting (XSS)",
+      "payloadPattern": "<img src=x onerror=alert(1)>",
+      "reason": "The provided proof does not demonstrate the actual execution of the payload, as the code snippet appears to be incomplete and does not show the rendering of the HTML page with the injected payload.",
+      "timestamp": "2026-05-15T12:36:51.163Z"
+    }
+  ]
+}

