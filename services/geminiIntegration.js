@@ -3,7 +3,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 class GeminiIntegration {
   static client = null;
-  static apiKey = process.env.GEMINI_API_KEY || 'AIzaSyAwDdHV9jF2PTF96BKjJeqez6OyXJJvko8';
+  static apiKey = process.env.GEMINI_API_KEY || '';
 
   /**
    * Initialize Gemini client
