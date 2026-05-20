@@ -97,10 +97,12 @@ const server = http.createServer(app);
 
 // Configure allowed origins for CORS
 const allowedOrigins = [
+  process.env.FRONTEND_URL, // Production Vercel URL
+  'https://zer0n.vercel.app', // Hardcoded fallback for your specific deployment
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:5000'
-];
+].filter(Boolean);
 
 const io = socketIO(server, {
   cors: { 
@@ -1352,10 +1354,10 @@ server.listen(PORT, () => {
   console.log(`\n${'='.repeat(60)}`);
   console.log('🎯 ZerOn Vulnerability Scanner - Backend Started!');
   console.log(`${'='.repeat(60)}`);
-  console.log(`✓ Server running on http://localhost:${PORT}`);
+  console.log(`✓ Server running on port ${PORT}`);
   console.log(`✓ Socket.io ready for real-time updates`);
   console.log(`✓ API endpoints available`);
   console.log(`✓ Allowed Origins: ${allowedOrigins.join(', ')}`);
-  console.log(`✓ Local Frontend: http://localhost:3000`);
+  console.log(`✓ Production Frontend: ${process.env.FRONTEND_URL || 'https://zer0n.vercel.app'}`);
   console.log(`${'='.repeat(60)}\n`);
 });
