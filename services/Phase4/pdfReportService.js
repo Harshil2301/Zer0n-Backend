@@ -18,9 +18,11 @@ class PDFReportService {
   static async generatePDF(scan) {
     const html = this._buildHTML(scan);
     
+    // Use environment variable for executable path (required for Render)
     const browser = await puppeteer.launch({
       headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
 
     try {
