@@ -68,11 +68,13 @@ function createAuthStub() {
 let serviceAccount;
 if (process.env.FIREBASE_CONFIG) {
   try {
-    serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG);
+    // Handle both stringified JSON and potential escaped newlines
+    const configStr = process.env.FIREBASE_CONFIG.replace(/\\n/g, '\n');
+    serviceAccount = JSON.parse(configStr);
     useRealtimeFirebase = true;
+    console.log('Using FIREBASE_CONFIG from environment variables.');
   } catch (error) {
     console.error('Failed to parse FIREBASE_CONFIG environment variable:', error.message);
-    console.error('Falling back to in-memory Firebase stub for local development.');
     useRealtimeFirebase = false;
   }
 } else if (process.env.FIREBASE_CREDENTIALS_PATH) {
@@ -84,14 +86,22 @@ if (process.env.FIREBASE_CONFIG) {
 
     serviceAccount = require(credentialsPath);
     useRealtimeFirebase = true;
+    console.log('Using Firebase credentials from path:', credentialsPath);
   } catch (error) {
     console.error('Failed to load Firebase credentials from path:', error.message);
-    console.error('Falling back to in-memory Firebase stub for local development.');
     useRealtimeFirebase = false;
   }
 } else {
-  console.warn('Firebase credentials not configured. Using in-memory stub for Firestore and Auth.');
-  useRealtimeFirebase = false;
+  // Try default location as last resort before stub
+  try {
+    const defaultPath = path.join(process.cwd(), 'config', 'firebase-credentials.json');
+    serviceAccount = require(defaultPath);
+    useRealtimeFirebase = true;
+    console.log('Using Firebase credentials from default local path.');
+  } catch (e) {
+    console.warn('Firebase credentials not found in ENV or File. Using in-memory stub.');
+    useRealtimeFirebase = false;
+  }
 }
 
 const projectId = process.env.FIREBASE_PROJECT_ID || 'zeron-6b44c';
