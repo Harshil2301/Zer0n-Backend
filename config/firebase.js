@@ -68,9 +68,33 @@ function createAuthStub() {
 let serviceAccount;
 if (process.env.FIREBASE_CONFIG) {
   try {
-    // Handle both stringified JSON and potential escaped newlines
-    const configStr = process.env.FIREBASE_CONFIG.replace(/\\n/g, '\n');
-    serviceAccount = JSON.parse(configStr);
+    // Multi-stage cleaning to handle common cloud environment variable messes
+    let rawConfig = process.env.FIREBASE_CONFIG.trim();
+    
+    // If it's wrapped in single quotes by the platform, remove them
+    if (rawConfig.startsWith("'") && rawConfig.endsWith("'")) {
+      rawConfig = rawConfig.slice(1, -1);
+    }
+
+    try {
+      // First attempt: standard parse
+      serviceAccount = JSON.parse(rawConfig);
+    } catch (e) {
+      // Second attempt: clean up common escaping issues
+      // Convert literal newlines to \n characters
+      const cleaned = rawConfig
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\\n/g, '\n'); // Code expects decoded newlines for private_key
+      
+      serviceAccount = JSON.parse(cleaned);
+    }
+    
+    // Final check for private_key format
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+    
     useRealtimeFirebase = true;
     console.log('Using FIREBASE_CONFIG from environment variables.');
   } catch (error) {
