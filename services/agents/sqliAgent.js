@@ -51,7 +51,7 @@ class SqliAgent {
     if (io) io.emit('agent:update', { scanId, agent: this.type, status: 'started', vectors: attackVectors.length });
     
     const findings = [];
-    const ragContext = RagMemory.getContextForAgent(this.type);
+    const ragContext = await RagMemory.getContextForAgent(this.type);
     const targets = attackVectors.slice(0, 15);
 
     // Fire all vector analyses in parallel
@@ -91,6 +91,36 @@ class SqliAgent {
     for (let i = 0; i < responses.length; i++) {
       if (responses[i].status !== 'fulfilled' || !responses[i].value) continue;
       const { url: testUrl, status, body, payload } = responses[i].value;
+
+      // === WAF MUTATION ENGINE HOOK (Option 1) ===
+      if (status === 403 || status === 406 || body.toLowerCase().includes('cloudflare') || body.toLowerCase().includes('waf')) {
+        this.log(`  🛡️ WAF Block Detected (HTTP ${status}) for payload: "${payload}"`);
+        try {
+          const MutationEngine = require('../Phase3/mutationEngine');
+          const mutatedPayloads = await MutationEngine.mutatePayload(payload, 'SQLi', body.substring(0, 300));
+          
+          // Try mutated payloads
+          for (let m = 0; m < mutatedPayloads.length; m++) {
+            const mutPayload = mutatedPayloads[m];
+            this.log(`  → Trying mutated payload ${m+1}/${mutatedPayloads.length}: "${mutPayload}"`);
+            const mutRes = await this.firePayload(endpoint, parameter.name, mutPayload, sessionCookie);
+            
+            if (mutRes && mutRes.status !== 403 && mutRes.status !== 406) {
+              this.log(`  🔥 WAF BYPASSED! HTTP ${mutRes.status}`);
+              const mutMatchedSig = SQLI_SIGNATURES.find(sig => sig.test(mutRes.body));
+              if (mutMatchedSig) {
+                const errorSnippet = mutRes.body.match(mutMatchedSig)?.[0] || 'Database error';
+                this.log(`  ✅ SQLi CONFIRMED (WAF Bypassed)! Payload: "${mutPayload}" → "${errorSnippet}"`);
+                return this.buildFinding(endpoint.url, parameter.name, mutPayload, 'Error-based (WAF Bypassed)', errorSnippet, mutRes.url);
+              }
+            }
+          }
+        } catch (mutErr) {
+          this.log(`  ⚠ Mutation Engine failed: ${mutErr.message}`);
+        }
+      }
+      // ===========================================
+
 
       const matchedSig = SQLI_SIGNATURES.find(sig => sig.test(body));
       if (matchedSig) {

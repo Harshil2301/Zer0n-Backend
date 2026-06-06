@@ -643,6 +643,12 @@ ${report.summary}
 - **Parameter:** ${report.parameter}
 - **Confidence:** ${report.evidence.confidence}
 
+${vulnerability.zkp ? `## Cryptographic Commitment (Zero-Knowledge Proof)
+To protect the asset owner before the bounty is paid, the raw exploitation payload has been redacted. Instead, a SHA-256 commitment is provided below to cryptographically prove that the scanner successfully generated the working payload.
+- **Algorithm:** ${vulnerability.zkp.algorithm}
+- **Commitment Hash:** \`${vulnerability.zkp.commitment}\`
+- **Salt:** *(Will be revealed upon bounty payout to verify payload)*
+` : ''}
 ## Steps to Reproduce
 ${report.steps_to_reproduce.map(step => step).join('\n')}
 

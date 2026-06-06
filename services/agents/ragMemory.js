@@ -1,7 +1,4 @@
-const fs = require('fs');
-const path = require('path');
-
-const MEMORY_FILE = path.join(__dirname, '..', '..', 'config', 'rag-memory.json');
+const { db } = require('../../config/firebase');
 
 /**
  * RAG Memory Store
@@ -9,34 +6,23 @@ const MEMORY_FILE = path.join(__dirname, '..', '..', 'config', 'rag-memory.json'
  * This is a Global Memory - it learns from all scans across all users.
  */
 class RagMemory {
-  static initialize() {
-    const configDir = path.dirname(MEMORY_FILE);
-    if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
-    }
-    if (!fs.existsSync(MEMORY_FILE)) {
-      fs.writeFileSync(MEMORY_FILE, JSON.stringify({ learnedLessons: [] }, null, 2));
-    }
-  }
-
   /**
    * Log a new lesson when the Reflection Loop rejects a finding
    */
-  static logFalsePositive(vulnerabilityType, payload, rejectionReason) {
-    this.initialize();
+  static async logFalsePositive(vulnerabilityType, payload, rejectionReason) {
+    if (!db) {
+      console.warn('[RAG] Firebase not initialized, skipping memory log');
+      return false;
+    }
+    
     try {
-      const data = JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
-      
-      const newLesson = {
+      const ragRef = db.collection('ragMemory');
+      await ragRef.add({
         type: vulnerabilityType,
         payloadPattern: payload,
         reason: rejectionReason,
         timestamp: new Date().toISOString()
-      };
-
-      data.learnedLessons.push(newLesson);
-      fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
-      
+      });
       return true;
     } catch (e) {
       console.error('[RAG] Failed to log memory:', e);
@@ -47,17 +33,24 @@ class RagMemory {
   /**
    * Fetch context for an agent to prevent repeating past mistakes
    */
-  static getContextForAgent(vulnerabilityType) {
-    this.initialize();
+  static async getContextForAgent(vulnerabilityType) {
+    if (!db) return "";
+    
     try {
-      const data = JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
-      
-      // Filter lessons relevant to this agent
-      const relevantLessons = data.learnedLessons
-        .filter(l => l.type === vulnerabilityType)
-        .slice(-5); // Only take the 5 most recent to save token context
+      const ragRef = db.collection('ragMemory');
+      // Simple query: where type == vulnerabilityType, order by timestamp desc, limit 5
+      const snapshot = await ragRef
+        .where('type', '==', vulnerabilityType)
+        .orderBy('timestamp', 'desc')
+        .limit(5)
+        .get();
 
-      if (relevantLessons.length === 0) return "";
+      if (snapshot.empty) return "";
+
+      const relevantLessons = [];
+      snapshot.forEach(doc => {
+        relevantLessons.push(doc.data());
+      });
 
       let contextStr = "\n\nCRITICAL CONTEXT FROM PREVIOUS SCANS (RAG MEMORY):\n";
       contextStr += "The following patterns have historically been flagged as FALSE POSITIVES on this system. DO NOT report them again unless you have new absolute proof:\n";

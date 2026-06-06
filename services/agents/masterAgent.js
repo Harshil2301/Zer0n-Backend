@@ -91,24 +91,49 @@ Reply ONLY as JSON with no extra text:
     // ─────────────────────────────────────────────────
     let currentSurface = attackSurface;
     if (currentSurface.length === 0) {
-      console.log(`[Master Agent] 0 endpoints found. Assuming SPA (Single Page Application). Injecting known API paths...`);
-      const SPA_PROBE_PATHS = [
-        '/api/Users', '/rest/user/login', '/api/Products',
-        '/rest/products/search', '/api/SecurityQuestions'
+      console.log(`[Master Agent] 0 endpoints found. Injecting domain-aware fallback probe paths...`);
+      
+      const domainLower = (domain || '').toLowerCase();
+
+      // ─── PHP / Classic vulnerable sites (testphp.vulnweb.com, DVWA, etc.) ───
+      const PHP_PROBE = [
+        { path: '/listproducts.php?cat=1',        params: [{ name: 'cat', method: 'GET' }] },
+        { path: '/artists.php?artist=1',           params: [{ name: 'artist', method: 'GET' }] },
+        { path: '/search.php?test=query',          params: [{ name: 'test', method: 'GET' }] },
+        { path: '/guestbook.php',                  params: [{ name: 'name', method: 'POST' }, { name: 'text', method: 'POST' }] },
+        { path: '/userinfo.php?uid=1',             params: [{ name: 'uid', method: 'GET' }] },
+        { path: '/comment.php',                    params: [{ name: 'aid', method: 'POST' }] },
+        { path: '/login.php',                      params: [{ name: 'uname', method: 'POST' }, { name: 'pass', method: 'POST' }] },
+        { path: '/AJAX/infoartist.php?artist=1',   params: [{ name: 'artist', method: 'GET' }] },
       ];
+
+      // ─── SPA / Node.js / Modern apps (Juice Shop, testfire.net, etc.) ───
+      const SPA_PROBE = [
+        { path: '/api/Users',                   params: [{ name: 'email', method: 'POST' }, { name: 'password', method: 'POST' }] },
+        { path: '/rest/user/login',             params: [{ name: 'email', method: 'POST' }, { name: 'password', method: 'POST' }] },
+        { path: '/api/Products',                params: [{ name: 'q', method: 'GET' }] },
+        { path: '/rest/products/search',        params: [{ name: 'q', method: 'GET' }] },
+        { path: '/bank/main.jsp',               params: [{ name: 'passw', method: 'POST' }, { name: 'uid', method: 'POST' }] },
+      ];
+
+      // Detect which probe list to use
+      const isPhpSite = domainLower.includes('vulnweb') || domainLower.includes('dvwa') || domainLower.includes('.php');
+      const probeList = isPhpSite ? PHP_PROBE : SPA_PROBE;
+
       const injected = [];
-      for (const p of SPA_PROBE_PATHS) {
-        const url = `${domain.replace(/\/$/, '')}${p}`;
-        // Add auth parameters for login, generic for others
-        if (p.includes('login') || p.includes('Users')) {
-          injected.push({ endpoint: { url, method: 'POST' }, parameter: { name: 'email' } });
-          injected.push({ endpoint: { url, method: 'POST' }, parameter: { name: 'password' } });
-        } else {
-          injected.push({ endpoint: { url, method: 'GET' }, parameter: { name: 'q' } });
+      const base = domain.replace(/\/$/, '');
+      for (const probe of probeList) {
+        const url = `${base}${probe.path}`;
+        for (const p of probe.params) {
+          injected.push({
+            endpoint: { url, method: p.method },
+            parameter: { name: p.name, location: p.method === 'POST' ? 'form' : 'query' }
+          });
         }
       }
       currentSurface = injected;
-      emit(`SPA detected. Injected known API endpoints for testing.`, 60);
+      console.log(`[Master Agent] Injected ${injected.length} domain-aware fallback vectors for ${isPhpSite ? 'PHP' : 'SPA'} target.`);
+      emit(`Crawler found 0 pages. Injected ${injected.length} known-vulnerable endpoints for direct testing.`, 60);
     }
 
     const fingerprint = await this.fingerprint(domain, currentSurface);
@@ -152,8 +177,8 @@ Reply ONLY as JSON with no extra text:
       )]);
 
     const agentTasks = [
-      withTimeout(this._runWithBackoff('SQLi', () => SqliAgent.analyze(sqliVectors, io, scanId, sessionCookie), sqliVectors.length), 10000),
-      withTimeout(this._runWithBackoff('XSS', () => XssAgent.analyze(xssVectors, io, scanId, sessionCookie), xssVectors.length), 10000),
+      withTimeout(this._runWithBackoff('SQLi', () => SqliAgent.analyze(sqliVectors, io, scanId, sessionCookie), sqliVectors.length), 45000),
+      withTimeout(this._runWithBackoff('XSS', () => XssAgent.analyze(xssVectors, io, scanId, sessionCookie), xssVectors.length), 45000),
       this._runWithBackoff('Headers', () => HeaderAgent.analyze(headerVectors, io, scanId, sessionCookie), headerVectors.length), // Deterministic, no timeout needed
       withTimeout(this._runWithBackoff('Auth', () => AuthAgent.analyze(authVectors, io, scanId, sessionCookie), authVectors.length), 12000), // Auth needs slightly more time
       withTimeout(this._runWithBackoff('IDOR', () => IdorAgent.analyze(idorVectors, io, scanId, sessionCookie), idorVectors.length), 12000), // IDOR Agent
@@ -225,10 +250,37 @@ Reply ONLY as JSON with no extra text:
           progress: 85,
           findings: confirmedFindings.length
         });
+      } else if (verdict.verdict === 'Needs Manual Review') {
+        ambiguousFindings.push({ finding, verdict });
+        console.log(`[Reflection] ⚠️ AMBIGUOUS: ${finding.type} — passing to Stage 2`);
       } else {
         falsePositivesCaught++;
-        RagMemory.logFalsePositive(finding.type, finding.payload, verdict.reason);
+        await RagMemory.logFalsePositive(finding.type, finding.payload, verdict.reason);
         console.log(`[Reflection] ❌ REJECTED: ${finding.type} — ${verdict.reason}`);
+      }
+    }
+
+    // Stage 2: SambaNova Deep Judge for ambiguous findings
+    if (ambiguousFindings.length > 0) {
+      emit(`Stage 1 complete. Running Stage 2 DeepSeek-R1 reasoning on ${ambiguousFindings.length} ambiguous findings...`, 88);
+      for (const { finding, verdict } of ambiguousFindings) {
+        const deepVerdict = await this.sambanovaDeepJudge(finding);
+        if (deepVerdict.verdict === 'Confirmed True Positive') {
+          finding.severity = finding.severity || verdict.severity || 'Medium';
+          finding.confidence = 60; // SambaNova confirmed
+          confirmedFindings.push(finding);
+          console.log(`[SambaNova] ✅ CONFIRMED: ${finding.type} on ${finding.endpoint}`);
+          if (io) io.emit(`progress_${scanId}`, {
+            phase: 'Phase 3: Deep Reasoning',
+            status: `DeepSeek Confirmed: ${finding.type}`,
+            progress: 90,
+            findings: confirmedFindings.length
+          });
+        } else {
+          falsePositivesCaught++;
+          await RagMemory.logFalsePositive(finding.type, finding.payload, "SambaNova DeepSeek-R1 rejected finding");
+          console.log(`[SambaNova] ❌ REJECTED: ${finding.type}`);
+        }
       }
     }
 

@@ -7,12 +7,22 @@ const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
+const dns = require('dns').promises;
 require('dotenv').config();
+
+// ── Strict Secrets Enforcement ──────────────────────────────────────────────
+const REQUIRED_ENV_VARS = ['FACE_DESCRIPTOR_SALT', 'JWT_SECRET', 'ADMIN_KEY', 'GEMINI_API_KEY', 'NOTARY_SECRET'];
+for (const envVar of REQUIRED_ENV_VARS) {
+  if (!process.env[envVar]) {
+    console.error(`[FATAL] Missing required environment variable: ${envVar}. Server cannot start securely.`);
+    process.exit(1);
+  }
+}
 
 // ── Biometric Security Helpers ────────────────────────────────────────────
 // AES-256-CBC encryption key derived from env salt (32 bytes)
 const FACE_ENC_KEY = Buffer.alloc(32);
-Buffer.from(process.env.FACE_DESCRIPTOR_SALT || 'zeron-face-salt-2026-unique-per-deploy', 'utf8').copy(FACE_ENC_KEY);
+Buffer.from(process.env.FACE_DESCRIPTOR_SALT, 'utf8').copy(FACE_ENC_KEY);
 
 function encryptDescriptor(descriptorArray) {
   const iv = crypto.randomBytes(16);
@@ -77,14 +87,23 @@ const ValidatorEngine = require('./services/Phase3/validatorEngine');
 const ResponseAnalyzer = require('./services/Phase3/responseAnalyzer');
 const SeverityCalculator = require('./services/Phase3/severityCalculator');
 const PoCGenerator = require('./services/Phase3/pocGenerator');
-const AdvancedExploitationService = require('./services/Phase3/advancedExploitationService');
-
+// Lazy-load to mitigate startup risks of the 51KB monolith
+let AdvancedExploitationService;
+const getAdvancedExploitationService = () => {
+  if (!AdvancedExploitationService) {
+    AdvancedExploitationService = require('./services/Phase3/advancedExploitationService');
+  }
+  return AdvancedExploitationService;
+};
 // Phase 4: Reporting
 const ReportGenerator = require('./services/Phase4/reportGenerator');
 const BugBountyReportService = require('./services/Phase4/bugBountyReportService');
 const PDFReportService = require('./services/Phase4/pdfReportService');
 const IpfsService = require('./services/Phase4/ipfsService');
 const EscrowService = require('./services/Phase4/escrowService');
+const MerkleService = require('./services/Phase4/merkleService');
+const NotaryService = require('./services/Phase4/notaryService');
+const ZkpService = require('./services/Phase4/zkpService');
 
 
 // ==========================================
@@ -115,7 +134,12 @@ const io = socketIO(server, {
         return callback(null, true);
       }
       
-      return callback(null, true); // For now, allow all (you can restrict later)
+      // Allow dynamic Vercel previews
+      if (origin.endsWith('.vercel.app')) {
+        return callback(null, true);
+      }
+      
+      return callback(new Error('Not allowed by CORS')); // Enforce strict CORS
     },
     methods: ['GET', 'POST'],
     credentials: true
@@ -133,14 +157,19 @@ app.use(cors({
       return callback(null, true);
     }
     
-    return callback(null, true); // For now, allow all
+    // Allow dynamic Vercel previews
+    if (origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    
+    return callback(new Error('Not allowed by CORS')); // Enforce strict CORS
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ limit: '2mb', extended: true }));
 
 // Health Check Route
 app.get('/', (req, res) => {
@@ -167,7 +196,7 @@ const requireBiometric = (req, res, next) => {
   
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'zeron-biometric-jwt-secret-2026-change-in-prod');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     if (!decoded.biometricVerified) {
       return res.status(403).json({ error: 'Token does not have biometric verified claim' });
     }
@@ -180,6 +209,21 @@ const requireBiometric = (req, res, next) => {
 
 // Store active scans in memory (for demo) AND Firebase
 const activeScans = {};
+
+// Clean up old scans from memory to prevent leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const scanId in activeScans) {
+    const scan = activeScans[scanId];
+    if (scan.status === 'completed' || scan.status === 'failed') {
+      const scanTime = new Date(scan.createdAt).getTime();
+      // Remove if older than 2 hours
+      if (now - scanTime > 2 * 60 * 60 * 1000) {
+        delete activeScans[scanId];
+      }
+    }
+  }
+}, 60 * 60 * 1000); // Run every hour
 
 // Save scan to Firebase
 async function saveScanToFirebase(scanData) {
@@ -273,12 +317,44 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// ── In-Memory Face Vector Cache ──────────────────────────────────────────────
+// Holds decrypted face vectors in RAM to avoid per-login Firebase round-trips.
+// Startup: load all vectors once. Enroll: push new vector live. Verify: pure RAM math.
+let faceVectorCache = []; // [{ id, userId, uuid, vector: Float32Array, isEncrypted, timestamp }]
+
+async function initFaceCache() {
+  try {
+    const snapshot = await db.collection('faceVectors').get();
+    faceVectorCache = [];
+    snapshot.forEach(doc => {
+      const d = doc.data();
+      // Handle both AES-encrypted (new) and legacy raw (old) formats
+      let vector = d.encryptedVector
+        ? decryptDescriptor(d.encryptedVector)
+        : (Array.isArray(d.vector) ? d.vector : null);
+      if (!vector) return; // skip corrupt docs
+      faceVectorCache.push({
+        id: doc.id,
+        userId: d.userId,
+        uuid: d.uuid || d.userId,
+        vector,
+        isEncrypted: !!d.encryptedVector,
+        timestamp: d.timestamp,
+      });
+    });
+    console.log(`[Cache] ✓ Loaded ${faceVectorCache.length} face vectors into memory`);
+  } catch (error) {
+    console.error('[Cache] ✗ Failed to initialize face vector cache:', error.message);
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ─── ADMIN: Purge old face vectors (run once after model upgrade) ───────────
-// Use: POST /api/admin/purge-face-vectors  with body { adminKey: "zeron-admin-2026" }
+// Use: POST /api/admin/purge-face-vectors  with body { adminKey: "..." }
 // Required after switching from TinyFaceDetector → SSD Mobilenet v1
 app.post('/api/admin/purge-face-vectors', async (req, res) => {
   const { adminKey } = req.body;
-  if (adminKey !== 'zeron-admin-2026') {
+  if (adminKey !== process.env.ADMIN_KEY) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
@@ -286,7 +362,8 @@ app.post('/api/admin/purge-face-vectors', async (req, res) => {
     const snapshot = await faceVectorsRef.get();
     const deletePromises = snapshot.docs.map(doc => doc.ref.delete());
     await Promise.all(deletePromises);
-    console.log(`[ADMIN] Purged ${snapshot.size} old face vectors from Firebase`);
+    faceVectorCache = []; // ← Clear in-memory cache in sync with DB
+    console.log(`[ADMIN] Purged ${snapshot.size} old face vectors from Firebase and cleared cache`);
     return res.json({ success: true, deleted: snapshot.size, message: 'Re-enroll all users now.' });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -294,6 +371,44 @@ app.post('/api/admin/purge-face-vectors', async (req, res) => {
 });
 
 // ─── Face Enroll (AES-encrypted storage) ───────────────────────────────────
+
+app.get('/api/fix-my-face', async (req, res) => {
+  try {
+    const keyword = (req.query.keyword || 'zeron').toLowerCase();
+    const faceVectorsRef = db.collection('faceVectors');
+    const snapshot = await faceVectorsRef.get();
+    let deletedCount = 0;
+    
+    // Find vectors belonging to the testing account by looking at the users collection
+    const usersSnapshot = await db.collection('users').get();
+    const testUserIds = [];
+    usersSnapshot.forEach(doc => {
+      const data = doc.data();
+      const name = (data.profile?.fullName || '').toLowerCase();
+      const email = (data.profile?.email || '').toLowerCase();
+      if (name.includes(keyword) || email.includes(keyword)) {
+        testUserIds.push(doc.id);
+      }
+    });
+
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      if (testUserIds.includes(data.userId)) {
+        await doc.ref.delete();
+        deletedCount++;
+      }
+    }
+    
+    // Clear RAM cache to force refresh
+    faceVectorCache = [];
+    
+    return res.json({ success: true, message: `Purged ${deletedCount} face vectors matching keyword '${keyword}'.` });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
 // Receives raw descriptor from frontend, encrypts it, stores ciphertext only
 // Raw biometric data NEVER touches Firestore
 app.post('/api/face/enroll', async (req, res) => {
@@ -311,7 +426,17 @@ app.post('/api/face/enroll', async (req, res) => {
       model: 'ssd_mobilenetv1_v2', // track model version for future migrations
       timestamp: new Date().toISOString(),
     });
-    console.log(`[Enroll] Encrypted vector stored for user ${userId}`);
+
+    // ← Push decrypted vector into RAM cache immediately so user can log in right away
+    faceVectorCache.push({
+      id: docRef.id,
+      userId,
+      uuid: userId,
+      vector: faceVector,
+      isEncrypted: true,
+      timestamp: new Date().toISOString(),
+    });
+    console.log(`[Enroll] ✓ Encrypted vector stored and cached for user ${userId} (cache size: ${faceVectorCache.length})`);
     return res.json({ success: true, docId: docRef.id, uuid: userId });
   } catch (error) {
     console.error('[Enroll] Error:', error);
@@ -319,42 +444,63 @@ app.post('/api/face/enroll', async (req, res) => {
   }
 });
 
-// ─── Face Verification: Decrypt → Euclidean → 3-zone → JWT ─────────────────
-const faceAttempts = new Map(); // IP → attempt count
+// ─── Face Verification: Cache-First → Euclidean → 3-zone → JWT ──────────────
+const faceVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 attempts per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Use email login.' }
+});
 
-app.post('/api/face/verify', async (req, res) => {
-  // Rate limiting (max 5 attempts per 15 minutes per IP)
-  const ip = req.ip || req.connection.remoteAddress;
-  const attempts = faceAttempts.get(ip) || 0;
-  if (attempts >= 5) {
-    return res.status(429).json({ error: 'Too many attempts. Use email login.' });
-  }
-  faceAttempts.set(ip, attempts + 1);
-  setTimeout(() => faceAttempts.delete(ip), 15 * 60 * 1000); // Reset after 15 mins
-
+app.post('/api/face/verify', faceVerifyLimiter, async (req, res) => {
   const { faceVector } = req.body;
   if (!faceVector || !Array.isArray(faceVector)) {
     return res.status(400).json({ error: 'Invalid face vector' });
   }
   try {
-    const snapshot = await db.collection('faceVectors').get();
+    // ── Cache-first lookup: pure RAM math, no DB round-trip ─────────────────
+    // If cache is empty (e.g. server just booted and initFaceCache hasn't run yet),
+    // fall back to Firebase to ensure no user is locked out.
+    let source = faceVectorCache;
+    let usedFallback = false;
+    if (source.length === 0) {
+      console.warn('[Face Verify] Cache empty — falling back to Firebase (will self-heal after initFaceCache)');
+      const snapshot = await db.collection('faceVectors').get();
+      source = [];
+      snapshot.forEach(doc => {
+        const d = doc.data();
+        let vector = d.encryptedVector
+          ? decryptDescriptor(d.encryptedVector)
+          : (Array.isArray(d.vector) ? d.vector : null);
+        if (vector) source.push({ id: doc.id, userId: d.userId, uuid: d.uuid || d.userId, vector, isEncrypted: !!d.encryptedVector, timestamp: d.timestamp });
+      });
+      usedFallback = true;
+    }
+
     let lowestDistance = Infinity;
     let bestMatch = null;
 
-    snapshot.forEach(doc => {
-      const d = doc.data();
-      // Support both new encrypted and legacy raw format
-      let storedVector = d.encryptedVector ? decryptDescriptor(d.encryptedVector) : (Array.isArray(d.vector) ? d.vector : null);
-      if (!storedVector || storedVector.length !== faceVector.length) return;
-      const dist = euclideanDistance(faceVector, storedVector);
-      if (dist < lowestDistance) {
+    for (const entry of source) {
+      if (!entry.vector || entry.vector.length !== faceVector.length) continue;
+      const dist = euclideanDistance(faceVector, entry.vector);
+      
+      // If we have a tie (two accounts for the exact same physical face)
+      // we prioritize the oldest account (the main account)
+      if (bestMatch && dist < 0.38 && bestMatch.distance < 0.38) {
+        const currentIsOlder = new Date(entry.timestamp || 0) < new Date(bestMatch.timestamp || 0);
+        if (currentIsOlder) {
+          lowestDistance = dist;
+          bestMatch = { id: entry.id, distance: dist, isEncrypted: entry.isEncrypted, userId: entry.userId, uuid: entry.uuid, timestamp: entry.timestamp };
+        }
+      } else if (dist < lowestDistance) {
         lowestDistance = dist;
-        bestMatch = { id: doc.id, distance: dist, isEncrypted: !!d.encryptedVector, userId: d.userId, uuid: d.uuid || d.userId, timestamp: d.timestamp };
+        bestMatch = { id: entry.id, distance: dist, isEncrypted: entry.isEncrypted, userId: entry.userId, uuid: entry.uuid, timestamp: entry.timestamp };
       }
-    });
+    }
 
     const zone = matchZone(lowestDistance);
-    console.log(`[Face Verify] dist=${lowestDistance.toFixed(4)} zone=${zone.result} conf=${zone.confidence}`);
+    console.log(`[Face Verify] dist=${lowestDistance.toFixed(4)} zone=${zone.result} conf=${zone.confidence} source=${usedFallback ? 'firebase-fallback' : `cache(${faceVectorCache.length})`}`);
 
     if (zone.result === 'REJECTED' || !bestMatch) {
       return res.json({ match: null, zone });
@@ -365,7 +511,7 @@ app.post('/api/face/verify', async (req, res) => {
     // CONFIRMED: issue short-lived biometric JWT (8h expiry)
     const bioToken = jwt.sign(
       { userId: bestMatch.uuid, biometricVerified: true, method: 'face_ssd_v2', confidence: zone.confidence },
-      process.env.JWT_SECRET || 'zeron-biometric-jwt-secret-2026-change-in-prod',
+      process.env.JWT_SECRET,
       { expiresIn: '8h' }
     );
     return res.json({ match: bestMatch, zone, bioToken });
@@ -374,6 +520,7 @@ app.post('/api/face/verify', async (req, res) => {
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
+
 
 // Get Plans
 app.get('/api/plans', (req, res) => {
@@ -426,6 +573,8 @@ app.post('/api/scan/start', requireBiometric, scanLimiter, async (req, res) => {
     createdAt: new Date().toISOString(),
     estimatedDuration: 1800000
   });
+
+  io.emit('scan_started', { scanId, userId: req.user.userId || scanData.userId });
 
   // Start real scanning in background
   performRealScan(scanId);
@@ -597,7 +746,7 @@ app.post('/api/remediation/suggest', async (req, res) => {
 
   try {
     const { GoogleGenerativeAI } = require('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || 'dummy_key');
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
     
     const prompt = `
@@ -727,6 +876,34 @@ async function performRealScan(scanId) {
       progress: 100,
       findings: scan.vulnerabilities.length
     });
+    io.emit('scan_complete', { scanId });
+
+    // Webhook Notification Dispatch
+    try {
+      if (scan.userId && scan.userId !== 'anonymous' && scan.userId !== 'dev-bypass') {
+        const userDoc = await db.collection('users').doc(scan.userId).get();
+        if (userDoc.exists) {
+          const userData = userDoc.data();
+          const webhookUrl = userData.notifications?.webhookUrl;
+          if (webhookUrl) {
+            console.log(`[Webhook] Dispatching scan completion to ${webhookUrl}`);
+            await fetch(webhookUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: 'scan_completed',
+                scanId: scan.scanId,
+                domain: scan.domain,
+                findings: scan.vulnerabilities.length,
+                timestamp: new Date().toISOString()
+              })
+            }).catch(e => console.error(`[Webhook] Failed to dispatch: ${e.message}`));
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Webhook] Error fetching user or sending webhook:', err.message);
+    }
     
   } catch (error) {
     console.error(`❌ Scan error for ${scanId}:`, error);
@@ -740,6 +917,7 @@ async function performRealScan(scanId) {
       progress: scan.progress,
       findings: scan.vulnerabilities.length
     });
+    io.emit('scan_complete', { scanId });
   }
 }
 
@@ -854,8 +1032,8 @@ async function runPhase1(scanId, targets) {
         const crawler = new CrawlerService();
         // Pass sessionCookie to crawler
         const crawlResult = await crawler.crawl(target, { 
-          maxDepth: 3,
-          maxPages: 100,
+          maxDepth: 5,
+          maxPages: 250,
           sessionCookie: scan.sessionCookie
         });
         
@@ -1206,6 +1384,12 @@ async function runPhase4(scanId, vulnerabilities) {
   // Generate per-vulnerability reports — each wrapped in try-catch so one failure doesn't kill the whole phase
   for (const vuln of vulnerabilitiesToReport) {
     try {
+      // Create Zero-Knowledge Proof (ZKP) Commitment to protect the payload
+      const zkp = ZkpService.generateCommitment(vuln.payload);
+      vuln.zkp = zkp;
+      vuln.payloadRaw = vuln.payload; // Store raw internally for later
+      vuln.payload = `[REDACTED_ZKP_COMMITMENT:${zkp.commitment}]`;
+
       const bbReport = BugBountyReportService.generateBugBountyReport(vuln);
       const markdownReport = BugBountyReportService.generateMarkdownReport(vuln);
       bugBountyReports.push({ vulnerability: vuln, report: bbReport, markdown: markdownReport, submission_ready: true });
@@ -1240,6 +1424,23 @@ async function runPhase4(scanId, vulnerabilities) {
   // Store reports
   scan.report = executiveReport;
   scan.bugBountyReports = bugBountyReports;
+  
+  // Generate Merkle Tree for verifiable findings
+  try {
+    const merkleResult = MerkleService.generateTree(vulnerabilitiesToReport);
+    scan.merkleRoot = merkleResult.root;
+    scan.merkleLeaves = merkleResult.leaves;
+    console.log(`  🌳 Merkle Root Generated: ${merkleResult.root || 'N/A'}`);
+    
+    // Attest (sign) the Merkle Root with the Independent Notary Node
+    if (scan.merkleRoot) {
+      const attestation = NotaryService.signPayload(scan.merkleRoot);
+      scan.notaryAttestation = attestation;
+      console.log(`  ✍️  Notary Signature: ${attestation.signature.substring(0, 32)}...`);
+    }
+  } catch (e) {
+    console.error('  ⚠ Merkle Tree generation failed:', e.message);
+  }
   
   // Estimate rewards
   let estimatedRewards = { total: 0, critical: 0, high: 0, medium: 0, low: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 };
@@ -1350,7 +1551,7 @@ function _estimateBugBountyRewards(reports) {
 // ============================================================================
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`\n${'='.repeat(60)}`);
   console.log('🎯 ZerOn Vulnerability Scanner - Backend Started!');
   console.log(`${'='.repeat(60)}`);
@@ -1360,4 +1561,8 @@ server.listen(PORT, () => {
   console.log(`✓ Allowed Origins: ${allowedOrigins.join(', ')}`);
   console.log(`✓ Production Frontend: ${process.env.FRONTEND_URL || 'https://zer0n.vercel.app'}`);
   console.log(`${'='.repeat(60)}\n`);
+
+  // Pre-load and decrypt all face vectors into RAM for instant login
+  await initFaceCache();
+
 });

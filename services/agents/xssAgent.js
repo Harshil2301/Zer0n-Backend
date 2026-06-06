@@ -23,7 +23,7 @@ class XssAgent {
     if (io) io.emit('agent:update', { scanId, agent: this.type, status: 'started', vectors: attackVectors.length });
     
     const findings = [];
-    const ragContext = RagMemory.getContextForAgent(this.type);
+    const ragContext = await RagMemory.getContextForAgent(this.type);
 
     const targets = attackVectors.slice(0, 15);
 

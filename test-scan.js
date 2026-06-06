@@ -8,7 +8,7 @@
 const axios = require('axios');
 const io = require('socket.io-client');
 
-const BACKEND_URL = 'http://localhost:5000';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5000';
 const TEST_DOMAIN = 'testphp.vulnweb.com';
 
 console.log('\n' + '='.repeat(70));
