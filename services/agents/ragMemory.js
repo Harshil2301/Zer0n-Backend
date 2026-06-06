@@ -41,8 +41,6 @@ class RagMemory {
       // Simple query: where type == vulnerabilityType, order by timestamp desc, limit 5
       const snapshot = await ragRef
         .where('type', '==', vulnerabilityType)
-        .orderBy('timestamp', 'desc')
-        .limit(5)
         .get();
 
       if (snapshot.empty) return "";
@@ -52,10 +50,14 @@ class RagMemory {
         relevantLessons.push(doc.data());
       });
 
+      // Sort by timestamp desc and limit to 5 in Javascript to avoid Firebase Index requirements
+      relevantLessons.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      const topLessons = relevantLessons.slice(0, 5);
+
       let contextStr = "\n\nCRITICAL CONTEXT FROM PREVIOUS SCANS (RAG MEMORY):\n";
       contextStr += "The following patterns have historically been flagged as FALSE POSITIVES on this system. DO NOT report them again unless you have new absolute proof:\n";
       
-      relevantLessons.forEach((lesson, i) => {
+      topLessons.forEach((lesson, i) => {
         contextStr += `${i + 1}. Payload/Pattern: "${lesson.payloadPattern}" -> Reason it was rejected: "${lesson.reason}"\n`;
       });
 
