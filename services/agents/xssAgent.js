@@ -21,12 +21,12 @@ class XssAgent {
     this.logLines.push(`${new Date().toISOString()} ${line}`);
   }
 
-  async analyze(attackVectors, io = null, scanId = null, sessionCookie = '') {
+  async analyze(attackVectors, io = null, scanId = null, sessionCookie = '', domain = null) {
     this.log(`Starting analysis on ${attackVectors.length} vectors...`);
     if (io) io.emit('agent:update', { scanId, agent: this.type, status: 'started', vectors: attackVectors.length });
     
     const findings = [];
-    const ragContext = await RagMemory.getContextForAgent(this.type);
+    const ragContext = await RagMemory.getContextForAgent(this.type, domain);
 
     // FIX #4/#5: Raise cap to MAX_VECTORS and warn if any are dropped
     const skipped = attackVectors.length - MAX_VECTORS;

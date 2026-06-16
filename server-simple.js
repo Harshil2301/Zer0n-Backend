@@ -66,10 +66,15 @@ function euclideanDistance(a, b) {
 }
 
 function matchZone(distance) {
-  if (distance < 0.35) return { result: 'CONFIRMED', confidence: 'HIGH' };
-  if (distance < 0.45) return { result: 'CONFIRMED', confidence: 'MEDIUM' };
-  if (distance < 0.55) return { result: 'UNCERTAIN', action: 'request_mfa' };
-  return { result: 'REJECTED', confidence: 'HIGH' };
+  // Tightened thresholds for 1:N face identification (sibling-safe)
+  // SSD MobileNet v1 128-dim descriptor typical ranges:
+  //   Same person:    0.0 – 0.30
+  //   Siblings:       0.30 – 0.55
+  //   Strangers:      0.55+
+  if (distance < 0.28) return { result: 'CONFIRMED', confidence: 'HIGH' };    // Tight: definitely the same person
+  if (distance < 0.35) return { result: 'CONFIRMED', confidence: 'MEDIUM' };  // Reasonable confidence
+  if (distance < 0.50) return { result: 'UNCERTAIN', action: 'request_mfa' }; // Siblings, twins, unclear
+  return { result: 'REJECTED', confidence: 'HIGH' };                          // Stranger
 }
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -427,6 +432,40 @@ app.post('/api/admin/purge-face-vectors', async (req, res) => {
 
 // ─── Face Enroll (AES-encrypted storage) ───────────────────────────────────
 
+// ─── Face Reassignment (Account Recovery / Merge) ────────────────────────────
+// If a user loses their face vector and re-enrolls, they get a NEW uuid.
+// When they enter their email, we find their OLD uuid and reassign the face.
+app.post('/api/face/reassign', async (req, res) => {
+  const { oldUuid, newUuid } = req.body;
+  if (!oldUuid || !newUuid) return res.status(400).json({ error: 'Missing UUIDs' });
+
+  try {
+    const faceVectorsRef = db.collection('faceVectors');
+    const snapshot = await faceVectorsRef.where('userId', '==', oldUuid).get();
+    
+    if (snapshot.empty) return res.json({ success: false, message: 'No face vector to reassign' });
+
+    // Update DB
+    const updatePromises = snapshot.docs.map(doc => 
+      doc.ref.update({ userId: newUuid, uuid: newUuid })
+    );
+    await Promise.all(updatePromises);
+
+    // Update RAM Cache
+    faceVectorCache = faceVectorCache.map(entry => {
+      if (entry.userId === oldUuid) {
+        return { ...entry, userId: newUuid, uuid: newUuid };
+      }
+      return entry;
+    });
+
+    console.log(`[Face Merge] ✓ Reassigned face vector from newly generated UUID ${oldUuid} to existing account ${newUuid}`);
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/fix-my-face', async (req, res) => {
   try {
     const keyword = (req.query.keyword || 'zeron').toLowerCase();
@@ -472,17 +511,33 @@ app.post('/api/face/enroll', async (req, res) => {
     return res.status(400).json({ error: 'Invalid payload' });
   }
   try {
-    const encryptedVector = encryptDescriptor(faceVector);
     const faceVectorsRef = db.collection('faceVectors');
+
+    // ── CRITICAL FIX: Delete ALL previous vectors for this user first ──────────
+    // Without this, repeated enrollments accumulate multiple vectors per user.
+    // More vectors = larger match surface area = higher false-positive risk (e.g. siblings).
+    // Each user should have exactly ONE authoritative face vector at all times.
+    const existing = await faceVectorsRef.where('userId', '==', userId).get();
+    const deletePromises = existing.docs.map(doc => doc.ref.delete());
+    await Promise.all(deletePromises);
+    if (existing.size > 0) {
+      console.log(`[Enroll] 🗑 Purged ${existing.size} old vector(s) for user ${userId} before re-enrollment`);
+    }
+
+    // Also evict from RAM cache to stay in sync with DB
+    faceVectorCache = faceVectorCache.filter(e => e.userId !== userId);
+
+    // Now store the single fresh encrypted vector
+    const encryptedVector = encryptDescriptor(faceVector);
     const docRef = await faceVectorsRef.add({
       encryptedVector,          // AES-256 ciphertext only — no raw biometrics
       userId,
       uuid: userId,
-      model: 'ssd_mobilenetv1_v2', // track model version for future migrations
+      model: 'ssd_mobilenetv1_v2',
       timestamp: new Date().toISOString(),
     });
 
-    // ← Push decrypted vector into RAM cache immediately so user can log in right away
+    // Push fresh decrypted vector into RAM cache so user can log in right away
     faceVectorCache.push({
       id: docRef.id,
       userId,
@@ -491,8 +546,9 @@ app.post('/api/face/enroll', async (req, res) => {
       isEncrypted: true,
       timestamp: new Date().toISOString(),
     });
-    console.log(`[Enroll] ✓ Encrypted vector stored and cached for user ${userId} (cache size: ${faceVectorCache.length})`);
+    console.log(`[Enroll] ✓ Single encrypted vector stored for user ${userId} (total cache: ${faceVectorCache.length})`);
     return res.json({ success: true, docId: docRef.id, uuid: userId });
+
   } catch (error) {
     console.error('[Enroll] Error:', error);
     return res.status(500).json({ error: 'Enrollment failed' });
@@ -542,7 +598,8 @@ app.post('/api/face/verify', faceVerifyLimiter, async (req, res) => {
       
       // If we have a tie (two accounts for the exact same physical face)
       // we prioritize the oldest account (the main account)
-      if (bestMatch && dist < 0.38 && bestMatch.distance < 0.38) {
+      // Tie-breaking only applies when BOTH are very close (< 0.28 — definitely same person)
+      if (bestMatch && dist < 0.28 && bestMatch.distance < 0.28) {
         const currentIsOlder = new Date(entry.timestamp || 0) < new Date(bestMatch.timestamp || 0);
         if (currentIsOlder) {
           lowestDistance = dist;
@@ -624,20 +681,34 @@ app.get('/api/user/:userId', async (req, res) => {
 
 app.get('/api/user/:userId/scans', async (req, res) => {
   try {
-    const snapshot = await db.collection('scans')
-      .where('userId', '==', req.params.userId)
-      .get();
-      
-    const scans = [];
-    snapshot.forEach(doc => {
-      scans.push({ id: doc.id, ...doc.data() });
+    const userId = req.params.userId;
+    const scansMap = {}; // deduplicate by scanId
+
+    // Source 1: `scans` collection (individual scan documents)
+    const scansSnap = await db.collection('scans').where('userId', '==', userId).get();
+    scansSnap.forEach(doc => {
+      const d = { id: doc.id, ...doc.data() };
+      const key = d.scanId || doc.id;
+      scansMap[key] = d;
     });
-    
+
+    // Source 2: `scanreturn` collection (array of results per user)
+    const srDoc = await db.collection('scanreturn').doc(userId).get();
+    if (srDoc.exists) {
+      const results = srDoc.data().scanResults || [];
+      results.forEach(s => {
+        const key = s.scanId || s.domain + '_' + s.createdAt;
+        if (!scansMap[key]) scansMap[key] = s; // don't overwrite if already in scans
+      });
+    }
+
+    const scans = Object.values(scansMap);
     res.json({ success: true, scans });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 
 
 app.get('/api/user/:userId/check-complete', async (req, res) => {
@@ -664,27 +735,56 @@ app.post('/api/user/:userId/update', async (req, res) => {
 
 app.post('/api/user/:userId/complete-profile', async (req, res) => {
   try {
+    const userId = req.params.userId;
     const profileData = req.body;
     
-    await db.collection('users').doc(req.params.userId).set({
-      profile: profileData,
-      notifications: {
-        scanAlerts: true, // Enable email alerts by default
-        webhookUrl: ''
-      },
-      updatedAt: new Date().toISOString()
-    }, { merge: true });
-
-    // Send the welcome email
+    // ── CRITICAL: Check if another account already owns this email ─────────────
+    // If yes, return THAT account's userId so the frontend redirects correctly.
+    // This prevents the user ending up on a blank duplicate account.
+    let canonicalUserId = userId;
     if (profileData.email) {
+      try {
+        const emailSnap = await db.collection('users')
+          .where('profile.email', '==', profileData.email)
+          .limit(1).get();
+        if (!emailSnap.empty) {
+          const existingId = emailSnap.docs[0].id;
+          if (existingId !== userId) {
+            console.log(`[Profile] Email ${profileData.email} belongs to ${existingId}, not ${userId}. Redirecting.`);
+            canonicalUserId = existingId;
+          }
+        }
+      } catch (e) { /* non-fatal */ }
+    }
+
+    // ── Fetch existing data to protect plan/account/scan fields ───────────────
+    const existingDoc = await db.collection('users').doc(canonicalUserId).get();
+    const existingData = existingDoc.exists ? existingDoc.data() : {};
+
+    // Build update — NEVER overwrite plan/account if already set
+    const updatePayload = {
+      profile: profileData,
+      notifications: existingData.notifications || { scanAlerts: true, webhookUrl: '' },
+      updatedAt: new Date().toISOString()
+    };
+
+    // Preserve existing plan & account data — do NOT reset them on profile edit
+    if (existingData.plan) updatePayload.plan = existingData.plan;
+    if (existingData.account) updatePayload.account = existingData.account;
+
+    await db.collection('users').doc(canonicalUserId).set(updatePayload, { merge: true });
+
+    // Send the welcome email (only on first completion — check if profile existed before)
+    if (profileData.email && !existingDoc.exists) {
       NotificationService.sendWelcomeEmail(profileData.email, profileData.fullName).catch(() => {});
     }
 
-    res.json({ success: true });
+    res.json({ success: true, canonicalUserId });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 
 app.post('/api/verify-email-status', async (req, res) => {
   try {

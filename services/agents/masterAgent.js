@@ -177,11 +177,11 @@ Reply ONLY as JSON with no extra text:
       )]);
 
     const agentTasks = [
-      withTimeout(this._runWithBackoff('SQLi', () => SqliAgent.analyze(sqliVectors, io, scanId, sessionCookie), sqliVectors.length), 45000),
-      withTimeout(this._runWithBackoff('XSS', () => XssAgent.analyze(xssVectors, io, scanId, sessionCookie), xssVectors.length), 45000),
+      withTimeout(this._runWithBackoff('SQLi', () => SqliAgent.analyze(sqliVectors, io, scanId, sessionCookie, domain), sqliVectors.length), 45000),
+      withTimeout(this._runWithBackoff('XSS', () => XssAgent.analyze(xssVectors, io, scanId, sessionCookie, domain), xssVectors.length), 45000),
       this._runWithBackoff('Headers', () => HeaderAgent.analyze(headerVectors, io, scanId, sessionCookie), headerVectors.length), // Deterministic, no timeout needed
-      withTimeout(this._runWithBackoff('Auth', () => AuthAgent.analyze(authVectors, io, scanId, sessionCookie), authVectors.length), 30000), // Auth needs more time for Mistral
-      withTimeout(this._runWithBackoff('IDOR', () => IdorAgent.analyze(idorVectors, io, scanId, sessionCookie), idorVectors.length), 12000), // IDOR Agent
+      withTimeout(this._runWithBackoff('Auth', () => AuthAgent.analyze(authVectors, io, scanId, sessionCookie), authVectors.length), 30000),
+      withTimeout(this._runWithBackoff('IDOR', () => IdorAgent.analyze(idorVectors, io, scanId, sessionCookie), idorVectors.length), 12000),
     ];
 
     if (ssrfVectors.length > 0) {
@@ -189,6 +189,7 @@ Reply ONLY as JSON with no extra text:
     } else {
       console.log(`[Master Agent] SSRF agent skipped — no URL-like parameters found`);
     }
+
 
     const agentResults = await Promise.allSettled(agentTasks);
 
@@ -250,6 +251,8 @@ Reply ONLY as JSON with no extra text:
         
         confirmedFindings.push(finding);
         console.log(`[Reflection] ✅ CONFIRMED: ${finding.type} on ${finding.endpoint}`);
+        // Feed confirmed finding back into RAG so future scans learn from it
+        RagMemory.logTruePositive(finding, domain).catch(() => {});
         if (io) io.emit(`progress_${scanId}`, {
           phase: 'Phase 3: Reflection',
           status: `Confirmed: ${finding.type} on ${finding.endpoint}`,
@@ -276,6 +279,8 @@ Reply ONLY as JSON with no extra text:
           finding.confidence = 60; // SambaNova confirmed
           confirmedFindings.push(finding);
           console.log(`[SambaNova] ✅ CONFIRMED: ${finding.type} on ${finding.endpoint}`);
+          // Feed into RAG memory
+          RagMemory.logTruePositive(finding, domain).catch(() => {});
           if (io) io.emit(`progress_${scanId}`, {
             phase: 'Phase 3: Deep Reasoning',
             status: `DeepSeek Confirmed: ${finding.type}`,
