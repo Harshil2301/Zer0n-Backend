@@ -1627,10 +1627,20 @@ async function runPhase4(scanId, vulnerabilities) {
     findings: scan.vulnerabilities.length
   });
   
+  const severityMap = { 'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, 'INFO': 0, 'INFORMATIONAL': 0 };
+  
+  if (scan.vulnerabilities) {
+    scan.vulnerabilities.sort((a, b) => {
+      const sA = severityMap[(a.severity || '').toUpperCase()] || 0;
+      const sB = severityMap[(b.severity || '').toUpperCase()] || 0;
+      return sB - sA; // Sort descending (Critical first)
+    });
+  }
+
   const bugBountyReports = [];
   const vulnerabilitiesToReport = vulnerabilities || scan.vulnerabilities;
   
-  console.log(`  📝 Generating reports for ${vulnerabilitiesToReport.length} findings...`);
+  console.log(`  📝 Generating reports for ${vulnerabilitiesToReport.length} findings (Sorted by Severity)...`);
   
   // Generate per-vulnerability reports — each wrapped in try-catch so one failure doesn't kill the whole phase
   for (const vuln of vulnerabilitiesToReport) {

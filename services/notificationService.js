@@ -93,11 +93,16 @@ class NotificationService {
       if (!userDoc.exists) return;
 
       const userData = userDoc.data();
-      const scanAlerts = userData?.notifications?.scanAlerts;
-      const email = userData?.profile?.email;
+      // Default to true unless explicitly disabled
+      const scanAlerts = userData?.notifications?.scanAlerts !== false; 
+      // Check both profile.email and root email
+      const email = userData?.profile?.email || userData?.email;
 
       // Respect the user's notification preference
-      if (!scanAlerts || !email) return;
+      if (!scanAlerts || !email) {
+        console.log(`[Email] Skipping scan complete email for ${userId}. alertsEnabled=${scanAlerts}, hasEmail=${!!email}`);
+        return;
+      }
 
       const vulns = scanData.vulnerabilities || [];
       const critical = vulns.filter(v => (v.severity || '').toLowerCase() === 'critical').length;
@@ -129,7 +134,7 @@ class NotificationService {
 
       <!-- Risk Banner -->
       <div style="display:inline-block;background:${riskColor}22;border:1px solid ${riskColor};border-radius:20px;padding:6px 18px;margin-bottom:24px;">
-        <span style="color:${riskColor};font-weight:700;font-size:13px;letter-spacing:1px;">Overall Risk: ${riskLabel}</span>
+        <span style="color:${riskColor};font-weight:700;font-size:13px;letter-spacing:1px;">Assessment Level: ${riskLabel}</span>
       </div>
 
       <!-- Stats Grid -->
@@ -182,9 +187,10 @@ class NotificationService {
 </html>`;
 
       await this.transporter.sendMail({
-        from: `"ZerOn Security" <${process.env.SMTP_EMAIL}>`,
+        from: `"ZerOn Platform" <${process.env.SMTP_EMAIL}>`,
         to: email,
-        subject: `🛡️ Scan Complete: ${vulns.length} vulnerabilities found on ${scanData.domain}`,
+        subject: `ZerOn Assessment Completed: ${scanData.domain}`,
+        text: `Scan Completed for ${scanData.domain}. Assessment Level: ${riskLabel}. Findings: ${critical} Critical, ${high} High, ${medium} Medium, ${low} Low. View your full report at https://zer0n.vercel.app/report/${scanData.scanId}`,
         html
       });
 
@@ -255,9 +261,10 @@ class NotificationService {
 </html>`;
 
       await this.transporter.sendMail({
-        from: `"ZerOn Security" <${process.env.SMTP_EMAIL}>`,
+        from: `"ZerOn Platform" <${process.env.SMTP_EMAIL}>`,
         to: email,
         subject: `Welcome to ZerOn Security, ${fullName || 'Analyst'}!`,
+        text: `Welcome to ZerOn, ${fullName || 'Security Analyst'}! Your biometric identity has been securely verified and your account is ready. Navigate to the Dashboard to view your active plan and launch an assessment. Go to Dashboard: https://zer0n.vercel.app/dashboard`,
         html
       });
 
