@@ -84,6 +84,16 @@ class PDFReportService {
     return 'LOW';
   }
 
+  static _escapeHTML(str) {
+    if (!str) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
   static _buildHTML(scan) {
     const vulns = scan.vulnerabilities || [];
     const domain = scan.domain || 'Unknown';
@@ -107,15 +117,15 @@ class PDFReportService {
       <div class="vuln-card" style="border-left: 4px solid ${color}; background: ${bg};">
         <div class="vuln-header">
           <div class="vuln-number">#${i + 1}</div>
-          <div class="vuln-title">${v.type}</div>
+          <div class="vuln-title">${this._escapeHTML(v.type)}</div>
           <div class="cvss-badge" style="background: ${color}; color: #000;">CVSS ${cvss.toFixed(1)}</div>
           <div class="sev-badge" style="color: ${color}; border: 1px solid ${color};">${sev}</div>
         </div>
         <div class="vuln-details">
-          <div class="detail-row"><span class="label">Endpoint</span><code>${v.endpoint || 'N/A'}</code></div>
-          <div class="detail-row"><span class="label">Parameter</span><code>${v.parameter || 'N/A'}</code></div>
-          <div class="detail-row"><span class="label">Payload</span><code>${(v.payload || 'N/A').substring(0, 100)}</code></div>
-          <div class="detail-row"><span class="label">Evidence</span><span class="proof">${(v.proof || v.description || 'See server response').substring(0, 200)}</span></div>
+          <div class="detail-row"><span class="label">Endpoint</span><code>${this._escapeHTML(v.endpoint || 'N/A')}</code></div>
+          <div class="detail-row"><span class="label">Parameter</span><code>${this._escapeHTML(v.parameter || 'N/A')}</code></div>
+          <div class="detail-row"><span class="label">Payload</span><code>${this._escapeHTML((v.payload || 'N/A').substring(0, 100))}</code></div>
+          <div class="detail-row"><span class="label">Evidence</span><span class="proof">${this._escapeHTML((v.proof || v.description || 'See server response').substring(0, 200))}</span></div>
         </div>
         <div class="remediation-box">
           <strong>Remediation:</strong>

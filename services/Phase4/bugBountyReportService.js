@@ -58,23 +58,23 @@ class BugBountyReportService {
    */
   static _generateTitle(vuln) {
     const titles = {
-      'SQL Injection':                 `SQL Injection in ${vuln.parameter} parameter allows database access`,
-      'SQLi':                          `SQL Injection in ${vuln.parameter} parameter allows database access`,
+      'SQL Injection':                 `SQL Injection in ${vuln.parameter} parameter allows full database access`,
+      'SQLi':                          `SQL Injection in ${vuln.parameter} parameter allows full database access`,
       'Auth Bypass':                   `Authentication Bypass via ${vuln.parameter} — login possible without credentials`,
       'Cross-Site Scripting (XSS)':   `Reflected XSS in ${vuln.parameter} parameter enables session hijacking`,
       'Reflected XSS':                `Reflected XSS in ${vuln.parameter} parameter enables session hijacking`,
       'SSRF':                         `Server-Side Request Forgery (SSRF) via ${vuln.parameter} allows internal network access`,
       'Open Redirect':                `Open Redirect via ${vuln.parameter} enables phishing and OAuth token theft`,
-      'SSRF':                         `SSRF via ${vuln.parameter} allows cloud metadata access and internal service enumeration`,
       'Stored XSS':                   `Stored XSS via ${vuln.parameter} enables account takeover`,
       'RCE':                          `Remote Code Execution (RCE) via ${vuln.parameter} — full server compromise`,
       'Path Traversal':               `Path Traversal in ${vuln.parameter} exposes sensitive files`,
       'XXE':                          `XML External Entity (XXE) Injection allows file disclosure`,
       'LFI':                          `Local File Inclusion (LFI) in ${vuln.parameter} exposes system files`,
-      'IDOR':                         `Insecure Direct Object Reference (IDOR) in ${vuln.parameter} allows unauthorized access`,
-      'CSRF':                         `Cross-Site Request Forgery (CSRF) enables unauthorized actions`,
+      'IDOR':                         `Insecure Direct Object Reference (IDOR) in ${vuln.parameter} allows unauthorized data access`,
+      'CSRF':                         `Cross-Site Request Forgery (CSRF) enables unauthorized state-changing actions`,
       'AuthBypass':                   `Authentication Bypass via ${vuln.parameter} parameter`,
-      'Security Misconfiguration':    `Missing ${vuln.parameter} security header exposes users to attack`
+      'Auth Failures':                `Authentication Failures detected at ${vuln.endpoint} — weak credential controls`,
+      'Security Misconfiguration':    `Missing ${vuln.parameter} security header exposes users to ${vuln.parameter === 'content-security-policy' ? 'XSS attacks' : vuln.parameter === 'strict-transport-security' ? 'MITM attacks' : 'browser-based attacks'}`
     };
     return titles[vuln.type] || `${vuln.type} vulnerability in ${vuln.parameter} parameter`;
   }
@@ -84,6 +84,8 @@ class BugBountyReportService {
    */
   static _generateSummary(vuln) {
     const summaries = {
+      'SQL Injection': `A SQL Injection vulnerability exists in the "${vuln.parameter}" parameter at ${vuln.endpoint}. By injecting malicious SQL syntax, an attacker can manipulate database queries, leading to unauthorized data access, modification, or complete deletion of the database.`,
+      
       'SQLi': `A SQL Injection vulnerability exists in the "${vuln.parameter}" parameter at ${vuln.endpoint}. By injecting malicious SQL syntax, an attacker can manipulate database queries, potentially leading to unauthorized data access, modification, or deletion.`,
       
       'Error-based SQLi': `An Error-based SQL Injection vulnerability was discovered in the "${vuln.parameter}" parameter. The application returns verbose SQL error messages that reveal database structure and enable systematic data extraction.`,
@@ -208,23 +210,21 @@ class BugBountyReportService {
    * Generate HTTP request format
    */
   static _generateHTTPRequest(vuln) {
-    const method = vuln.request?.method || 'GET';
-    const url = new URL(vuln.endpoint);
-    
+    const method = (vuln.request?.method || 'GET').toUpperCase();
+    let hostname = vuln.endpoint;
+    let pathname = '/';
+    try {
+      const url = new URL(vuln.endpoint);
+      hostname = url.hostname;
+      pathname = url.pathname;
+    } catch (e) { /* malformed URL, use raw endpoint */ }
+    const param = vuln.parameter || 'param';
+    const payload = vuln.payload || '';
     if (method === 'GET') {
-      return `${method} ${url.pathname}?${vuln.parameter}=${encodeURIComponent(vuln.payload)} HTTP/1.1
-Host: ${url.hostname}
-User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
-Accept: text/html,application/xhtml+xml,application/xml
-Connection: close`;
+      return `GET ${pathname}?${param}=${encodeURIComponent(payload)} HTTP/1.1\nHost: ${hostname}\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\nAccept: text/html,application/xhtml+xml\nConnection: close`;
     } else {
-      return `${method} ${url.pathname} HTTP/1.1
-Host: ${url.hostname}
-User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
-Content-Type: application/x-www-form-urlencoded
-Content-Length: ${vuln.parameter.length + vuln.payload.length + 1}
-
-${vuln.parameter}=${encodeURIComponent(vuln.payload)}`;
+      const body = `${param}=${encodeURIComponent(payload)}`;
+      return `${method} ${pathname} HTTP/1.1\nHost: ${hostname}\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\nContent-Type: application/x-www-form-urlencoded\nContent-Length: ${body.length}\nConnection: close\n\n${body}`;
     }
   }
 
@@ -437,6 +437,38 @@ if (!in_array($host, $allowed_domains)) {
     die('Invalid URL');
 }
 $content = file_get_contents($url);`
+      },
+
+      'Auth Failures': {
+        immediate: [
+          'Remove or change all default credentials (admin/admin, root/password)',
+          'Implement account lockout after 5 failed attempts',
+          'Use generic error messages (never reveal if username or password is wrong)',
+          'Set cookie flags: Secure, HttpOnly, SameSite=Strict'
+        ],
+        long_term: [
+          'Implement Multi-Factor Authentication (MFA)',
+          'Use a vetted authentication library (Passport.js, Spring Security)',
+          'Enforce password complexity and minimum length (≥12 chars)',
+          'Rotate session tokens on every successful login',
+          'Implement CAPTCHA on login forms to prevent brute force'
+        ],
+        code_example: `// Node.js example — using bcrypt + secure session\nconst bcrypt = require('bcrypt');\nconst SALT_ROUNDS = 12;\n\n// Hash on registration:\nconst hash = await bcrypt.hash(plainPassword, SALT_ROUNDS);\n\n// Verify on login (constant-time compare prevents timing attacks):\nconst match = await bcrypt.compare(plainPassword, storedHash);\nif (!match) return res.status(401).json({ error: 'Invalid credentials' }); // generic message`
+      },
+
+      'IDOR': {
+        immediate: [
+          'Add server-side authorization check: verify the requesting user owns the resource',
+          'Never expose sequential integer IDs in URLs — switch to UUIDs',
+          'Return HTTP 403 (not 404) for unauthorized resource access'
+        ],
+        long_term: [
+          'Implement a centralized authorization layer (RBAC or ABAC)',
+          'Audit all object-reference endpoints in code review',
+          'Use indirect reference maps (random tokens instead of DB IDs)',
+          'Write automated authorization tests for all sensitive endpoints'
+        ],
+        code_example: `// VULNERABLE:\napp.get('/api/order/:id', (req, res) => {\n  const order = db.getOrder(req.params.id); // No ownership check!\n  res.json(order);\n});\n\n// SECURE:\napp.get('/api/order/:id', authenticate, (req, res) => {\n  const order = db.getOrder(req.params.id);\n  if (!order || order.userId !== req.user.id) {\n    return res.status(403).json({ error: 'Forbidden' });\n  }\n  res.json(order);\n});`
       }
     };
     

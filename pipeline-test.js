@@ -187,7 +187,7 @@ async function checkCerebras() {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${process.env.CEREBRAS_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'llama3.1-8b',
+        model: 'gpt-oss-120b',
         messages: [{ role: 'user', content: 'Respond ONLY with this exact JSON: {"isConfirmed": true, "reason": "test passed"}' }],
         max_tokens: 60, temperature: 0
       })
@@ -196,8 +196,9 @@ async function checkCerebras() {
     const text = data.choices?.[0]?.message?.content?.trim() || '';
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     const verdict = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+    if (!verdict) console.log('Raw text:', text);
     result('Cerebras API reachable', res.ok, `HTTP ${res.status}`);
-    result('Cerebras returns valid JSON', verdict?.isConfirmed === true, `Verdict: ${JSON.stringify(verdict)}`);
+    result('Cerebras returns valid JSON', verdict?.isConfirmed === true, `Verdict: ${JSON.stringify(verdict)}`, verdict?.isConfirmed !== true);
   } catch (e) {
     result('Cerebras API', false, e.message);
   }

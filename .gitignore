@@ -87,3 +87,8 @@ uploads/
 *.bak
 *.backup
 *~
+
+scratch/
+test*.js
+test.pdf
+get_latest_scan.js

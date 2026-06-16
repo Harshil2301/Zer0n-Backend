@@ -9,7 +9,7 @@ async function testGemini() {
   try {
     const { GoogleGenerativeAI } = require('@google/generative-ai');
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
     const result = await model.generateContent('Reply with exactly: GEMINI OK');
     const text = result.response.text().trim();
     return { status: '✅ PASS', response: text };
@@ -103,7 +103,7 @@ async function testCerebras() {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'llama3.1-8b',
+        model: 'gpt-oss-120b',
         messages: [{ role: 'user', content: 'Reply with exactly: CEREBRAS OK' }],
         max_tokens: 20,
         temperature: 0

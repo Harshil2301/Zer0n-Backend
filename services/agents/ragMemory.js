@@ -41,6 +41,7 @@ class RagMemory {
       // Simple query: where type == vulnerabilityType, order by timestamp desc, limit 5
       const snapshot = await ragRef
         .where('type', '==', vulnerabilityType)
+        .limit(100) // Prevent full-collection scan as RAG memory grows
         .get();
 
       if (snapshot.empty) return "";

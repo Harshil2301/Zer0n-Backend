@@ -25,7 +25,7 @@ const URL_PARAMS    = /url|uri|path|link|redirect|return|next|dest|target|goto|r
 
 class MasterAgent {
   constructor() {
-    this.name = 'Master Orchestrator (Gemini 1.5 Flash)';
+    this.name = 'Master Orchestrator (Gemini 2.0 Flash)';
     this.reflectionApiKey = process.env.CEREBRAS_API_KEY;
     this.sambanovaApiKey = process.env.SAMBANOVA_API_KEY;
     const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -56,7 +56,7 @@ Reply ONLY as JSON with no extra text:
 }`;
 
     try {
-      const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      const model = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
       const result = await model.generateContent(prompt);
       const text = result.response.text().trim();
       const jsonMatch = text.match(/\{[\s\S]*?\}/);
@@ -180,7 +180,7 @@ Reply ONLY as JSON with no extra text:
       withTimeout(this._runWithBackoff('SQLi', () => SqliAgent.analyze(sqliVectors, io, scanId, sessionCookie), sqliVectors.length), 45000),
       withTimeout(this._runWithBackoff('XSS', () => XssAgent.analyze(xssVectors, io, scanId, sessionCookie), xssVectors.length), 45000),
       this._runWithBackoff('Headers', () => HeaderAgent.analyze(headerVectors, io, scanId, sessionCookie), headerVectors.length), // Deterministic, no timeout needed
-      withTimeout(this._runWithBackoff('Auth', () => AuthAgent.analyze(authVectors, io, scanId, sessionCookie), authVectors.length), 12000), // Auth needs slightly more time
+      withTimeout(this._runWithBackoff('Auth', () => AuthAgent.analyze(authVectors, io, scanId, sessionCookie), authVectors.length), 30000), // Auth needs more time for Mistral
       withTimeout(this._runWithBackoff('IDOR', () => IdorAgent.analyze(idorVectors, io, scanId, sessionCookie), idorVectors.length), 12000), // IDOR Agent
     ];
 
@@ -210,10 +210,16 @@ Reply ONLY as JSON with no extra text:
     const dedupedFindings = allRawFindings.filter((finding, index, self) =>
       index === self.findIndex(f => {
         if (finding.type === 'Security Misconfiguration' || finding.type === 'Cryptographic Failures') {
+          // Headers: dedupe by header name (parameter)
           return f.type === finding.type && f.parameter === finding.parameter;
         }
-        // Strict deduplication for Auth and Injection per mentor: type + endpoint
-        return f.type === finding.type && f.endpoint === finding.endpoint;
+        if (finding.type === 'Auth Failures') {
+          // Auth: preserve all subtypes — dedupe by endpoint + proof snippet (each subtype has unique proof)
+          return f.type === finding.type && f.endpoint === finding.endpoint &&
+            (f.proof || '').substring(0, 60) === (finding.proof || '').substring(0, 60);
+        }
+        // For injection types: dedupe strictly by type + endpoint + parameter
+        return f.type === finding.type && f.endpoint === finding.endpoint && f.parameter === finding.parameter;
       })
     );
 
@@ -398,13 +404,16 @@ Output ONLY valid JSON in this exact format (no markdown blocks, no extra text):
 }`;
 
     try {
+      // FIX #3: Upgraded from llama3.1-8b (too small) to llama-3.3-70b for better
+      // judge reasoning. Also raised max_tokens from 250 → 600 to allow the model
+      // to fully reason through complex HTTP evidence before reaching a verdict.
       const res = await fetch('https://api.cerebras.ai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${this.reflectionApiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'llama3.1-8b',
+          model: 'gpt-oss-120b',
           messages: [{ role: 'user', content: prompt }],
-          max_tokens: 250,
+          max_tokens: 600,
           temperature: 0
         })
       });

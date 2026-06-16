@@ -1,4 +1,5 @@
-const fetch = require('node-fetch'); // or global fetch in Node 18+
+// Use native fetch (Node 18+) or fall back to node-fetch
+const fetch = globalThis.fetch || require('node-fetch');
 
 /**
  * Cloudflare AI Global Fallback

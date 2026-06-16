@@ -223,7 +223,9 @@ Return ONLY valid JSON, no explanation:
         const resFollow = await fetch(testUrl, { signal: controller2.signal, redirect: 'follow', headers: headers2 });
         const body = await resFollow.text();
 
-        const payloadDomain = payload.replace(/^https?:\/\//, '').split('/')[0]; // e.g. "evil.com"
+        const payloadDomain = payload.replace(/^https?:\/\//, '').replace(/^\/\//, '').split('/')[0]; // e.g. "evil.com"
+        // Guard: if payloadDomain is empty, skip (avoids false positive since ''.includes('') === true)
+        if (!payloadDomain || payloadDomain.length < 3) continue;
         const isClientRedirect =
           body.includes(payloadDomain) && (
             /window\.location/i.test(body) ||

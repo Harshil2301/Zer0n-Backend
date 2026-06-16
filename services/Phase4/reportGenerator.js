@@ -29,7 +29,7 @@ class ReportGenerator {
     // Process vulnerabilities
     scanResults.forEach(finding => {
       const vuln = {
-        id: `CVE-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+        id: `ZERON-FINDING-${Date.now()}-${Math.random().toString(36).substring(7)}`,
         type: finding.type,
         severity: SeverityCalculator.calculateSimpleSeverity(finding),
         endpoint: finding.endpoint,

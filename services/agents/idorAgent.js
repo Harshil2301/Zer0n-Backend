@@ -64,21 +64,40 @@ class IdorAgent {
 
     try {
       const urlObj = new URL(url);
-      const originalValue = urlObj.searchParams.get(paramName);
-      
-      // If the parameter isn't present in the URL or isn't numeric, we skip
-      if (!originalValue || isNaN(originalValue)) return null;
+      let originalValue = urlObj.searchParams.get(paramName);
+      let isPathBased = false;
+
+      // --- STRATEGY 1: Query-string parameter (e.g. ?id=5) ---
+      // --- STRATEGY 2: Path-segment ID (e.g. /api/user/5) ---
+      if (!originalValue || isNaN(originalValue)) {
+        // Try to extract a numeric segment from the URL path
+        const pathSegments = urlObj.pathname.split('/').filter(Boolean);
+        const numericSegment = pathSegments.find(seg => /^\d+$/.test(seg));
+        if (numericSegment) {
+          originalValue = numericSegment;
+          isPathBased = true;
+          this.log(`  [IDOR] Found numeric path segment: "${numericSegment}" in ${urlObj.pathname}`);
+        } else {
+          return null; // No testable numeric ID found anywhere
+        }
+      }
 
       const baseId = parseInt(originalValue, 10);
       const testIds = [baseId, baseId + 1, baseId + 2];
       const responses = [];
 
       for (const id of testIds) {
-        urlObj.searchParams.set(paramName, id);
-        const testUrl = urlObj.toString();
-        
+        let testUrl;
+        if (isPathBased) {
+          // Replace the numeric segment in the path
+          testUrl = url.replace(`/${originalValue}`, `/${id}`);
+        } else {
+          urlObj.searchParams.set(paramName, id);
+          testUrl = urlObj.toString();
+        }
+
         const controller = new AbortController();
-        setTimeout(() => controller.abort(), 8000);
+        setTimeout(() => controller.abort(), 20000);
 
         const headers = { 'User-Agent': 'Mozilla/5.0' };
         if (sessionCookie) headers['Cookie'] = sessionCookie;

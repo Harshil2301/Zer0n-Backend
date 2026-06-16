@@ -18,7 +18,11 @@ class SubdomainEnumerator {
       const ctSubdomains = await this._queryCertificateTransparency(domain);
       ctSubdomains.forEach(sub => subdomains.add(sub));
 
-      // Method 3: Common subdomains
+      // Method 3: SecurityTrails API (if key is present)
+      const stSubdomains = await this._querySecurityTrails(domain);
+      stSubdomains.forEach(sub => subdomains.add(sub));
+
+      // Method 4: Common subdomains
       const common = this._getCommonSubdomains(domain);
       common.forEach(sub => subdomains.add(sub));
 
@@ -86,6 +90,41 @@ class SubdomainEnumerator {
       }
     } catch (error) {
       console.log('CT logs query failed or timed out:', error.message);
+    }
+
+    return subdomains;
+  }
+
+  /**
+   * Query SecurityTrails API for advanced subdomain enumeration
+   */
+  static async _querySecurityTrails(domain) {
+    const subdomains = [];
+    const apiKey = process.env.SECURITYTRAILS_API_KEY;
+
+    if (!apiKey) {
+      console.log('SecurityTrails API key not found, skipping deep enumeration.');
+      return subdomains;
+    }
+
+    try {
+      console.log(`Querying SecurityTrails API for ${domain}...`);
+      const response = await axios.get(
+        `https://api.securitytrails.com/v1/domain/${domain}/subdomains`,
+        { 
+          headers: { 'APIKEY': apiKey },
+          timeout: 5000 
+        }
+      );
+
+      if (response.data && response.data.subdomains) {
+        response.data.subdomains.forEach(sub => {
+          subdomains.push(`${sub}.${domain}`);
+        });
+        console.log(`Found ${subdomains.length} subdomains via SecurityTrails.`);
+      }
+    } catch (error) {
+      console.log('SecurityTrails API query failed:', error.message);
     }
 
     return subdomains;

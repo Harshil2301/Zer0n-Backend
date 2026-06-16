@@ -99,7 +99,7 @@ class HeaderAgent {
       attackVectors
         .map(v => { try { const u = new URL(v.endpoint?.url || ''); return u.origin; } catch { return null; } })
         .filter(Boolean)
-    )].slice(0, 5); // Check up to 5 unique hosts
+    )].slice(0, 20); // Check up to 20 unique hosts
 
     this.log(`Auditing ${uniqueHosts.length} unique hosts: ${uniqueHosts.join(', ')}`);
 
@@ -121,7 +121,7 @@ class HeaderAgent {
     const findings = [];
     try {
       const controller = new AbortController();
-      setTimeout(() => controller.abort(), 10000);
+      setTimeout(() => controller.abort(), 20000);
 
       const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Security/ZerOn' };
       if (sessionCookie) headers['Cookie'] = sessionCookie;

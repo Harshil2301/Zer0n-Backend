@@ -4,6 +4,9 @@ const path = require('path');
 const askCloudflare = require('./utils/cloudflareFallback');
 require('dotenv').config();
 
+// FIX #4/#5: Configurable vector cap — no silent drops
+const MAX_VECTORS = 30;
+
 class XssAgent {
   constructor() {
     this.name = 'XSS Expert (Groq Llama 70B)';
@@ -25,7 +28,12 @@ class XssAgent {
     const findings = [];
     const ragContext = await RagMemory.getContextForAgent(this.type);
 
-    const targets = attackVectors.slice(0, 15);
+    // FIX #4/#5: Raise cap to MAX_VECTORS and warn if any are dropped
+    const skipped = attackVectors.length - MAX_VECTORS;
+    if (skipped > 0) {
+      console.warn(`[XSS Agent] ⚠️ Attack surface capped at ${MAX_VECTORS} vectors — ${skipped} vectors skipped. Consider increasing MAX_VECTORS for full coverage.`);
+    }
+    const targets = attackVectors.slice(0, MAX_VECTORS);
 
     // Fire all vector analyses in parallel
     const vectorPromises = targets.map(vector => {
@@ -65,27 +73,61 @@ class XssAgent {
       if (responses[i].status !== 'fulfilled' || !responses[i].value) continue;
       const { url: testUrl, status, body, payload } = responses[i].value;
 
-      // EXACT MATCH ONLY: The specific payload must appear literally in the server response body
-      // This is the only reliable way to confirm reflected XSS without false positives
-      // (payloadCore checks and hasDangerousContext checks cause false positives on normal pages)
-      const isRealReflection = body.includes(payload);
+      // FIX #2: Multi-layer XSS confirmation to eliminate false positives
+      //
+      // Layer 1: Payload must appear literally in the raw response body
+      const isLiterallyPresent = body.includes(payload);
 
-      if (isRealReflection) {
-        this.log(`  ✅ XSS CONFIRMED! Payload "${payload}" found literally in server response`);
-        return {
-          finding: true,
-          type: 'Cross-Site Scripting (XSS)',
-          endpoint: endpoint.url,
-          parameter: parameter.name,
-          payload,
-          severity: 'High',
-          description: `Reflected XSS confirmed. Payload "${payload}" was echoed back unescaped in the server response. Attackers can steal session cookies, hijack accounts, or execute arbitrary JavaScript in victim browsers.`,
-          proof: this.extractReflectedContext(body, payload),
-          testUrl
-        };
-      } else {
+      if (!isLiterallyPresent) {
         this.log(`  ↳ Payload ${i + 1}/${payloads.length}: "${payload.substring(0,30)}..." → HTTP ${status} — not reflected`);
+        continue;
       }
+
+      // Layer 2: Reject if the payload is HTML-entity-encoded in the response
+      // e.g. <script> becoming &lt;script&gt; means the server IS escaping it → NOT vulnerable
+      const htmlEncodedPayload = payload
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;');
+      
+      const isHtmlEncoded = body.includes(htmlEncodedPayload);
+      if (isHtmlEncoded) {
+        this.log(`  ↳ Payload ${i + 1}/${payloads.length}: "${payload.substring(0,30)}..." → reflected BUT HTML-encoded → NOT vulnerable (server is escaping correctly)`);
+        continue;
+      }
+
+      // Layer 3: The payload must appear in a context that would execute
+      // Check that it appears outside of a comment or a plain text node
+      const payloadIndex = body.indexOf(payload);
+      const snippetBefore = body.substring(Math.max(0, payloadIndex - 50), payloadIndex);
+      
+      // If the payload is inside an HTML comment (<!-- ... -->), it won't execute
+      const insideComment = snippetBefore.includes('<!--') && !snippetBefore.includes('-->');
+      if (insideComment) {
+        this.log(`  ↳ Payload ${i + 1}/${payloads.length}: "${payload.substring(0,30)}..." → reflected inside HTML comment → NOT executable`);
+        continue;
+      }
+
+      // All checks passed — confirmed reflected XSS
+      this.log(`  ✅ XSS CONFIRMED! Payload "${payload}" found unencoded in server response (not in comment)`);
+      return {
+        finding: true,
+        type: 'Cross-Site Scripting (XSS)',
+        endpoint: endpoint.url,
+        parameter: parameter.name,
+        payload,
+        severity: 'High',
+        cvss: 6.1,
+        cvssVector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N',
+        cwe: 'CWE-79',
+        owasp: 'A03:2021 – Injection',
+        description: `Reflected XSS confirmed on parameter "${parameter.name}". Payload "${payload}" was returned unescaped in the server HTML response. Attackers can steal session cookies, redirect victims, or execute arbitrary JavaScript in their browser.`,
+        proof: this.extractReflectedContext(body, payload),
+        remediation: 'HTML-encode all user input before rendering it in responses (use htmlspecialchars in PHP, DOMPurify in JS). Implement a strict Content-Security-Policy (CSP) header to block inline script execution.',
+        testUrl
+      };
     }
 
     return null;

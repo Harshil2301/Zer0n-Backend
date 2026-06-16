@@ -31,7 +31,8 @@ class DeduplicationEngine {
    * Generate unique vulnerability key
    */
   static _generateVulnerabilityKey(vuln) {
-    return `${vuln.type}:${vuln.parameter}`;
+    // Include endpoint so the same vuln-type on different pages is NOT merged
+    return `${vuln.type}:${vuln.endpoint}:${vuln.parameter}`;
   }
 
   /**

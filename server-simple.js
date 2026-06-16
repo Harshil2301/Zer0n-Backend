@@ -8,7 +8,20 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const dns = require('dns').promises;
+const helmet = require('helmet');
 require('dotenv').config();
+
+// ── Process Crash Protection ────────────────────────────────────────────────
+process.on('uncaughtException', (err) => {
+  console.error(`[FATAL] Uncaught Exception: ${err.message}`);
+  console.error(err.stack);
+  // Keep the process alive for enterprise resilience
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error(`[FATAL] Unhandled Rejection at:`, promise, `reason:`, reason);
+  // Keep the process alive
+});
 
 // ── Strict Secrets Enforcement ──────────────────────────────────────────────
 const REQUIRED_ENV_VARS = ['FACE_DESCRIPTOR_SALT', 'JWT_SECRET', 'ADMIN_KEY', 'GEMINI_API_KEY', 'NOTARY_SECRET'];
@@ -100,6 +113,7 @@ const ReportGenerator = require('./services/Phase4/reportGenerator');
 const BugBountyReportService = require('./services/Phase4/bugBountyReportService');
 const PDFReportService = require('./services/Phase4/pdfReportService');
 const IpfsService = require('./services/Phase4/ipfsService');
+const NotificationService = require('./services/notificationService');
 const EscrowService = require('./services/Phase4/escrowService');
 const MerkleService = require('./services/Phase4/merkleService');
 const NotaryService = require('./services/Phase4/notaryService');
@@ -120,7 +134,10 @@ const allowedOrigins = [
   'https://zer0n.vercel.app', // Hardcoded fallback for your specific deployment
   'http://localhost:3000',
   'http://localhost:3001',
-  'http://localhost:5000'
+  'http://localhost:5000',
+  'http://localhost:5173', // Vite default port
+  'http://127.0.0.1:5173', // Vite IP fallback
+  'http://127.0.0.1:3000'
 ].filter(Boolean);
 
 const io = socketIO(server, {
@@ -147,6 +164,18 @@ const io = socketIO(server, {
 });
 
 // Middleware
+app.use(helmet()); // Secure HTTP headers
+
+// Global Rate Limiting
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: { error: 'Too many requests from this IP, please try again after 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
+
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, curl, Postman)
@@ -284,6 +313,32 @@ const scanLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many scan requests initiated from this IP, please try again after an hour' }
 });
+
+// Per-User Scan Rate Limiter
+// Tracks scans per authenticated userId, not just IP (prevents VPN bypass)
+const userScanCounts = new Map(); // Map<userId, { count, windowStart }>
+const USER_SCAN_LIMIT    = 5;                  // max 5 scans per user per window
+const USER_SCAN_WINDOW   = 60 * 60 * 1000;    // 1 hour window
+
+function checkUserScanRateLimit(userId) {
+  if (!userId || userId === 'anonymous') return { allowed: true };
+  const now = Date.now();
+  const entry = userScanCounts.get(userId);
+
+  if (!entry || (now - entry.windowStart) > USER_SCAN_WINDOW) {
+    // First scan or window has expired — reset counter
+    userScanCounts.set(userId, { count: 1, windowStart: now });
+    return { allowed: true };
+  }
+
+  if (entry.count >= USER_SCAN_LIMIT) {
+    const resetIn = Math.ceil((USER_SCAN_WINDOW - (now - entry.windowStart)) / 60000);
+    return { allowed: false, resetIn };
+  }
+
+  entry.count++;
+  return { allowed: true };
+}
 
 // Apply global rate limiting to all API endpoints
 app.use('/api/', apiLimiter);
@@ -522,9 +577,167 @@ app.post('/api/face/verify', faceVerifyLimiter, async (req, res) => {
 });
 
 
+// ─── User Profile Fallbacks ─────────────────────────────────────────────────
+
+// Look up a user by email — used by Google login to detect face-enrolled accounts
+// and avoid creating duplicate user documents (one per login method).
+app.get('/api/user/by-email', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ success: false, error: 'email query param required' });
+  try {
+    const snapshot = await db.collection('users')
+      .where('profile.email', '==', email)
+      .limit(1)
+      .get();
+
+    if (!snapshot.empty) {
+      const doc = snapshot.docs[0];
+      return res.json({ success: true, userId: doc.id, user: doc.data() });
+    }
+
+    // Fallback: check top-level email field (older schema)
+    const snapshot2 = await db.collection('users')
+      .where('email', '==', email)
+      .limit(1)
+      .get();
+
+    if (!snapshot2.empty) {
+      const doc = snapshot2.docs[0];
+      return res.json({ success: true, userId: doc.id, user: doc.data() });
+    }
+
+    return res.json({ success: false, userId: null });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/user/:userId', async (req, res) => {
+  try {
+    const doc = await db.collection('users').doc(req.params.userId).get();
+    if (!doc.exists) return res.status(404).json({ success: false, error: 'User not found' });
+    res.json({ success: true, user: doc.data() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/user/:userId/scans', async (req, res) => {
+  try {
+    const snapshot = await db.collection('scans')
+      .where('userId', '==', req.params.userId)
+      .get();
+      
+    const scans = [];
+    snapshot.forEach(doc => {
+      scans.push({ id: doc.id, ...doc.data() });
+    });
+    
+    res.json({ success: true, scans });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.get('/api/user/:userId/check-complete', async (req, res) => {
+  try {
+    const doc = await db.collection('users').doc(req.params.userId).get();
+    if (!doc.exists) return res.json({ success: true, user: null });
+    res.json({ success: true, user: doc.data() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/user/:userId/update', async (req, res) => {
+  try {
+    await db.collection('users').doc(req.params.userId).set({
+      ...req.body,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/user/:userId/complete-profile', async (req, res) => {
+  try {
+    const profileData = req.body;
+    
+    await db.collection('users').doc(req.params.userId).set({
+      profile: profileData,
+      notifications: {
+        scanAlerts: true, // Enable email alerts by default
+        webhookUrl: ''
+      },
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    // Send the welcome email
+    if (profileData.email) {
+      NotificationService.sendWelcomeEmail(profileData.email, profileData.fullName).catch(() => {});
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/verify-email-status', async (req, res) => {
+  try {
+    const { uid } = req.body;
+    if (!uid) return res.status(400).json({ verified: false });
+    const userRecord = await admin.auth().getUser(uid);
+    res.json({ verified: userRecord.emailVerified });
+  } catch (error) {
+    res.status(500).json({ verified: false, error: error.message });
+  }
+});
+
 // Get Plans
 app.get('/api/plans', (req, res) => {
   res.json({ plans: PLANS });
+});
+
+app.post('/api/user/:userId/record-scan', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { scanRecord } = req.body;
+    
+    // 1. Add to scanreturn collection
+    const scanRef = db.collection('scanreturn').doc(userId);
+    const scanDoc = await scanRef.get();
+    
+    if (scanDoc.exists) {
+      await scanRef.update({
+        scanResults: admin.firestore.FieldValue.arrayUnion(scanRecord)
+      });
+    } else {
+      await scanRef.set({
+        userId: userId,
+        scanResults: [scanRecord]
+      });
+    }
+
+    // 2. Increment domainsUsed in user profile
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+    if (userDoc.exists) {
+      const userData = userDoc.data();
+      const currentUsed = userData.plan?.domainsUsed || 0;
+      await userRef.update({
+        'plan.domainsUsed': currentUsed + 1
+      });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error recording scan:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Start Scan (Protected by Biometric Session and Rate-Limited)
@@ -533,6 +746,14 @@ app.post('/api/scan/start', requireBiometric, scanLimiter, async (req, res) => {
 
   if (!domain) {
     return res.status(400).json({ error: 'Domain is required' });
+  }
+
+  // Per-user rate limit check (on top of IP-based scanLimiter)
+  const userRateCheck = checkUserScanRateLimit(req.user?.userId || userId);
+  if (!userRateCheck.allowed) {
+    return res.status(429).json({
+      error: `You've reached your scan limit (${USER_SCAN_LIMIT} scans/hour). Try again in ${userRateCheck.resetIn} minute(s).`
+    });
   }
 
   // Generate UUID for scan ID
@@ -670,10 +891,20 @@ app.get('/api/scan/:scanId', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching scan:', error);
-    res.status(500).json({ 
-      error: 'Internal server error',
-      message: 'Failed to fetch scan data from Firebase'
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Hide scan from frontend
+app.delete('/api/scan/:scanId', async (req, res) => {
+  try {
+    await db.collection('scans').doc(req.params.scanId).update({
+      hiddenInFrontend: true
     });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error hiding scan:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -718,8 +949,28 @@ app.get('/api/scans', async (req, res) => {
   }
 });
 
-// Download PDF Report
+// Download PDF Report — server-canonical URL
 app.get('/api/scan/:scanId/report.pdf', async (req, res) => {
+  const { scanId } = req.params;
+  let scan = activeScans[scanId];
+  if (!scan) scan = await getScanFromFirebase(scanId);
+  if (!scan) return res.status(404).json({ error: 'Scan not found' });
+
+  try {
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="ZerOn-Report-${scan.domain}-${scanId.substring(0,8)}.pdf"`);
+    const pdfBuffer = await PDFReportService.generatePDF(scan);
+    res.send(pdfBuffer);
+    console.log(`📄 PDF report generated for ${scan.domain} (${scan.vulnerabilities?.length || 0} findings)`);
+  } catch (err) {
+    console.error('PDF generation error:', err.message);
+    res.status(500).json({ error: 'PDF generation failed', detail: err.message });
+  }
+});
+
+// Download PDF Report — frontend URL alias: /api/report/pdf/:scanId
+// The frontend (NewScan.jsx) calls this pattern — must match exactly
+app.get('/api/report/pdf/:scanId', async (req, res) => {
   const { scanId } = req.params;
   let scan = activeScans[scanId];
   if (!scan) scan = await getScanFromFirebase(scanId);
@@ -1495,6 +1746,9 @@ async function runPhase4(scanId, vulnerabilities) {
     totalVulnerabilities: scan.vulnerabilities.length,
     estimatedBounty: estimatedRewards.total
   });
+
+  // Fire webhook + email notifications (non-blocking, never crashes the pipeline)
+  NotificationService.notifyScanComplete(scan.userId, db, scan).catch(() => {});
   
   return { executiveReport, bugBountyReports, estimatedRewards };
 }
@@ -1545,6 +1799,18 @@ function _estimateBugBountyRewards(reports) {
     lowCount
   };
 }
+
+// ============================================================================
+// GLOBAL ERROR HANDLER
+// ============================================================================
+app.use((err, req, res, next) => {
+  console.error(`[EXPRESS ERROR] ${req.method} ${req.path} -> ${err.message}`);
+  console.error(err.stack);
+  res.status(500).json({
+    error: 'Internal Server Error',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred.'
+  });
+});
 
 // ============================================================================
 // START SERVER

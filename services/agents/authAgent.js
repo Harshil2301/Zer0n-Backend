@@ -80,7 +80,7 @@ class AuthAgent {
     for (const test of authTests) {
       try {
         const controller = new AbortController();
-        setTimeout(() => controller.abort(), 10000);
+        setTimeout(() => controller.abort(), 20000);
 
         const res = await fetch(url, {
           method: 'POST',
@@ -185,21 +185,34 @@ Format:
       if (parsed.findings) parsed = parsed.findings;
       if (!Array.isArray(parsed)) parsed = [parsed];
 
-      const findings = parsed.map(f => ({
-        finding: true,
-        type: 'Auth Failures',
-        vulnerabilityType: f.subtype || 'Auth Failures',
-        endpoint: url,
-        parameter: paramName,
-        payload: 'Auth Tests',
-        severity: f.severity || 'High',
-        cvss: f.severity === 'High' ? 8.5 : 5.0,
-        description: `Authentication vulnerability detected: ${f.subtype}. ${f.evidence}`,
-        proof: f.evidence,
-        remediation: 'Implement proper authentication controls, generic error messages, and strong session management per OWASP recommendations.',
-        owasp: 'A07:2021 – Identification and Authentication Failures',
-        testUrl: url
-      }));
+      const cvssMap = {
+        'Default Credentials':          { score: 9.8, severity: 'Critical' },
+        'Username Enumeration':         { score: 5.3, severity: 'Medium' },
+        'Session Weakness':             { score: 7.5, severity: 'High' },
+        'Missing Account Lockout':      { score: 7.5, severity: 'High' },
+        'Unauthenticated Admin Access': { score: 9.1, severity: 'Critical' },
+      };
+
+      const findings = parsed.map(f => {
+        const cvssEntry = cvssMap[f.subtype] || { score: 6.5, severity: f.severity || 'Medium' };
+        return ({
+          finding: true,
+          type: 'Auth Failures',
+          vulnerabilityType: f.subtype || 'Auth Failures',
+          endpoint: url,
+          parameter: paramName,
+          payload: 'Auth Tests',
+          severity: cvssEntry.severity,
+          cvss: cvssEntry.score,
+          cvssVector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H',
+          cwe: 'CWE-287',
+          description: `Authentication vulnerability detected: ${f.subtype}. ${f.evidence}`,
+          proof: f.evidence,
+          remediation: 'Implement proper authentication controls: use generic error messages for failed logins, enforce account lockout after 5 failed attempts, and rotate session tokens on login. See OWASP Authentication Cheat Sheet.',
+          owasp: 'A07:2021 – Identification and Authentication Failures',
+          testUrl: url
+        });
+      });
 
       return findings;
     } catch (e) {
